@@ -1,9 +1,11 @@
+#include <absl/flags/flag.h>
+#include <absl/flags/parse.h>
+
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
-
-#include "absl/strings/str_join.h"
-#include "vcflib/Variant.h"
 
 __global__ void add_kernel(int n, float *x, float *y) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -13,10 +15,32 @@ __global__ void add_kernel(int n, float *x, float *y) {
   }
 }
 
+ABSL_FLAG(std::string, sample_list, "",
+          "A text file listing one cuking path per line.");
+
 int main(int argc, char **argv) {
-  std::vector<std::string> v = {"foo", "bar", "baz"};
-  std::string s = absl::StrJoin(v, "-");
-  std::cout << "Joined string: " << s << "\n";
+  absl::ParseCommandLine(argc, argv);
+
+  const auto &sample_list_file = absl::GetFlag(FLAGS_sample_list);
+  if (sample_list_file.empty()) {
+    std::cerr << "Error: no sample list file specified." << std::endl;
+    return 1;
+  }
+
+  std::ifstream sample_list(sample_list_file);
+  std::string line;
+  std::vector<std::string> sample_files;
+  while (std::getline(sample_list, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    sample_files.push_back(line);
+  }
+
+  for (const std::string &sample_file : sample_files) {
+    std::cout << sample_file << ": " << std::filesystem::file_size(sample_file)
+              << std::endl;
+  }
 
   constexpr int N = 1 << 20;
   float *x, *y;

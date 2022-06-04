@@ -18,13 +18,13 @@ add_executable(cuKING cuKING.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
 
 target_link_libraries(cuKING
-    absl::strings
+    absl::flags
+    absl::flags_parse
 )
 
 target_link_libraries(gvcf2cuking
     absl::flags
     absl::flags_parse
     absl::flat_hash_map
-    tabixpp
-    vcflib
+    hts
 )

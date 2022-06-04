@@ -7,7 +7,8 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
-#include <vcflib/Variant.h>
+#include <htslib/vcf.h>
+#include <htslib/vcfutils.h>
 
 #include <cassert>
 #include <fstream>
@@ -28,7 +29,7 @@ enum class VariantCategory {
 
 constexpr uint16_t kMaxLocusDelta = (1 << 14) - 1;
 
-inline uint16_t encode(const int64_t locus_delta,
+inline uint16_t Encode(const int64_t locus_delta,
                        const VariantCategory variant_category) {
   assert(locus_delta <= kMaxLocusDelta);
   return (locus_delta << 2) | static_cast<uint16_t>(variant_category);
@@ -49,16 +50,34 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  vcflib::VariantCallFile vcf;
-  std::string input_file_copy = input_file;  // open() below requires a copy.
-  vcf.open(input_file_copy);
-  if (!vcf.is_open()) {
-    std::cerr << "Error: failed to open \"" << input_file << "\"." << std::endl;
+  htsFile* const hts_file = bcf_open(input_file.c_str(), "r");
+  if (hts_file == nullptr) {
+    std::cerr << "Error: could not open \"" << input_file << "\"." << std::endl;
+    return 1;
+  }
+
+  bcf_hdr_t* const header = bcf_hdr_read(hts_file);
+  if (header == nullptr) {
+    std::cerr << "Error: failed to read header." << std::endl;
+    return 1;
+  }
+
+  const int num_samples = bcf_hdr_nsamples(header);
+  if (num_samples != 1) {
+    std::cerr << "Error: unexpected number of samples: " << num_samples
+              << "; only single-sample GVCFs are supported." << std::endl;
+    return 1;
+  }
+
+  int num_seqs = 0;
+  const auto seq_names = bcf_hdr_seqnames(header, &num_seqs);
+  if (seq_names == nullptr) {
+    std::cerr << "Error: failed to read sequence names." << std::endl;
     return 1;
   }
 
   // Used to convert to global position (for GRCh38).
-  const absl::flat_hash_map<string_view, int64_t> chr_offsets = {
+  const absl::flat_hash_map<std::string_view, int64_t> chr_offsets = {
       {"chr1", 0},           {"chr2", 248956422},   {"chr3", 491149951},
       {"chr4", 689445510},   {"chr5", 879660065},   {"chr6", 1061198324},
       {"chr7", 1232004303},  {"chr8", 1391350276},  {"chr9", 1536488912},
@@ -66,55 +85,63 @@ int main(int argc, char** argv) {
       {"chr13", 2077042982}, {"chr14", 2191407310}, {"chr15", 2298451028},
       {"chr16", 2400442217}, {"chr17", 2490780562}, {"chr18", 2574038003},
       {"chr19", 2654411288}, {"chr20", 2713028904}, {"chr21", 2777473071},
-      {"chr22", 282418305},  {"chrX", 287500152},   {"chrY", 303104241},
+      {"chr22", 2824183054}, {"chrX", 2875001522},  {"chrY", 3031042417},
   };
 
-  vcflib::Variant variant(vcf);
+  bcf1_t* const record = bcf_init();
+  if (record == nullptr) {
+    std::cerr << "Error: failed to init record." << std::endl;
+    return 1;
+  }
+
   int64_t last_position = -1, num_skips = 0, processed = 0;
+  int* genotypes = nullptr;
   std::vector<uint16_t> encoded;
-  while (vcf.getNextVariant(variant)) {
+  while (bcf_read(hts_file, header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
-      std::cout << "Processed " << (processed >> 20) << " Mi records..."
-                << std::endl;
+      std::cout << "Processed " << (processed >> 20) << " Mi records, encoded "
+                << encoded.size() << " entries..." << std::endl;
     }
 
-    if (variant.sampleNames.size() != 1) {
-      std::cerr << "Error: unexpected number of samples: "
-                << variant.sampleNames.size()
-                << "; only single-sample GVCFs are supported." << std::endl
-                << variant << std::endl;
-      return 1;
-    }
-
-    const auto offset = chr_offsets.find(variant.sequenceName);
+    const auto offset = chr_offsets.find(seq_names[record->rid]);
     if (offset == chr_offsets.end()) {
       continue;  // Ignore this contig, e.g. alts.
     }
-    const int64_t global_position =
-        offset->second + variant.zeroBasedPosition();
 
+    const int64_t global_position = offset->second + record->pos;
     if (global_position <= last_position) {
-      std::cerr << "Error: variants not sorted by global position." << std::endl
-                << variant << std::endl;
+      std::cerr << "Error: variants not sorted by global position ("
+                << seq_names[record->rid] << ", " << record->pos << ")."
+                << std::endl;
       return 1;
+    }
+
+    int num_genotypes = 0;
+    if (bcf_get_format_int32(header, record, "GT", &genotypes,
+                             &num_genotypes) <= 0 ||
+        num_genotypes != 2) {
+      continue;  // GT not present or unexpected number of GT entries.
+    }
+
+    const int num_ref_alleles =
+        (bcf_gt_allele(genotypes[0]) == 0) + (bcf_gt_allele(genotypes[1]) == 0);
+
+    if (num_ref_alleles == 2) {  // HomRef
+      continue;
     }
 
     int64_t locus_delta = global_position - last_position;
     // If the delta doesn't fit, add skips.
     while (locus_delta > kMaxLocusDelta) {
-      encoded.push_back(encode(kMaxLocusDelta - 1, VariantCategory::kSkip));
+      encoded.push_back(Encode(kMaxLocusDelta - 1, VariantCategory::kSkip));
       locus_delta -= kMaxLocusDelta - 1;
       ++num_skips;
     }
 
-    const std::string genotype =
-        variant.getGenotype(variant.sampleNames.front());
-    const auto decomposed_gt = vcflib::decomposeGenotype(genotype);
-
-    if (vcflib::isHet(decomposed_gt)) {
-      encoded.push_back(encode(locus_delta, VariantCategory::kHet));
-    } else if (vcflib::isHomNonRef(decomposed_gt)) {
-      encoded.push_back(encode(locus_delta, VariantCategory::kHomAlt));
+    if (num_ref_alleles == 1) {
+      encoded.push_back(Encode(locus_delta, VariantCategory::kHet));
+    } else if (num_ref_alleles == 0) {
+      encoded.push_back(Encode(locus_delta, VariantCategory::kHomAlt));
     }
 
     last_position = global_position;
@@ -128,6 +155,12 @@ int main(int argc, char** argv) {
   std::cout << "Stats:" << std::endl
             << "  entries: " << encoded.size() << std::endl
             << "  skips: " << num_skips << std::endl;
+
+  bcf_close(hts_file);
+  bcf_hdr_destroy(header);
+  bcf_destroy(record);
+  free(genotypes);
+  free(seq_names);
 
   return 0;
 }
