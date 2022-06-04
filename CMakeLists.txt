@@ -12,6 +12,8 @@ enable_language(CUDA)
 
 add_subdirectory(abseil-cpp)
 
-add_executable(main main.cu)
+add_executable(cuKING cuKING.cu)
+add_executable(gvcf2cuking gvcf2cuking.cc)
 
-target_link_libraries(main absl::strings)
+target_link_libraries(cuKING absl::strings)
+target_link_libraries(gvcf2cuking absl::flags absl::flags_parse tabixpp vcflib)

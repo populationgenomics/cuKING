@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "absl/strings/str_join.h"
+#include "vcflib/Variant.h"
 
 __global__ void add_kernel(int n, float *x, float *y) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
