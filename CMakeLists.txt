@@ -8,6 +8,8 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_ARCHITECTURES 60)  # P100
 
+add_compile_options(-Wall)
+
 enable_language(CUDA)
 
 add_subdirectory(abseil-cpp)
