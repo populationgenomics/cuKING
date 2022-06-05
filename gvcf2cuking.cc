@@ -2,13 +2,14 @@
 //
 // Note: assumes alignment with GRCh38 to convert to global positions.
 //
-// Example: ./gvcf2cuking --input=NA12878.g.vcf.gz --output=NA12878.cuking
+// Example: ./gvcf2cuking --input=NA12878.g.vcf.gz --output=NA12878.cuking.zst
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <htslib/vcf.h>
 #include <htslib/vcfutils.h>
+#include <zstd.h>
 
 #include <cassert>
 #include <fstream>
@@ -19,7 +20,7 @@
 ABSL_FLAG(std::string, input, "",
           "The GVCF input filename, e.g. NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
-          "The cuking output filename, e.g. NA12878.cuking");
+          "The cuking output filename, e.g. NA12878.cuking.zst");
 
 enum class VariantCategory {
   kHet = 0,
@@ -147,11 +148,6 @@ int main(int argc, char** argv) {
     last_position = global_position;
   }
 
-  std::ofstream out(output_file, std::ios::out | std::ios::binary);
-  out.write(reinterpret_cast<const char*>(encoded.data()),
-            encoded.size() * sizeof(uint16_t));
-  out.close();
-
   std::cout << "Stats:" << std::endl
             << "  entries: " << encoded.size() << std::endl
             << "  skips: " << num_skips << std::endl;
@@ -161,6 +157,26 @@ int main(int argc, char** argv) {
   bcf_destroy(record);
   free(genotypes);
   free(seq_names);
+
+  // zstd-compress the result.
+  const size_t encoded_byte_size = encoded.size() * sizeof(uint16_t);
+  const size_t compress_bound = ZSTD_compressBound(encoded_byte_size);
+  std::vector<unsigned char> compressed(compress_bound);
+  constexpr int kZstdCompressionLevel = 3;
+  const size_t zstd_result =
+      ZSTD_compress(compressed.data(), compressed.size(), encoded.data(),
+                    encoded_byte_size, kZstdCompressionLevel);
+  if (ZSTD_isError(zstd_result)) {
+    std::cerr << "Error: failed to zstd-compress the result." << std::endl;
+    return 1;
+  }
+  compressed.resize(zstd_result);
+
+  // Write the output file.
+  std::ofstream out(output_file, std::ios::out | std::ios::binary);
+  out.write(reinterpret_cast<const char*>(encoded.data()),
+            encoded.size() * sizeof(uint16_t));
+  out.close();
 
   return 0;
 }

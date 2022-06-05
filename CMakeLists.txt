@@ -27,4 +27,5 @@ target_link_libraries(gvcf2cuking
     absl::flags_parse
     absl::flat_hash_map
     hts
+    zstd
 )
