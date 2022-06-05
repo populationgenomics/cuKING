@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 
-project(cuKING LANGUAGES CXX CUDA)
+project(cuking LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(ABSL_PROPAGATE_CXX_STD ON)
@@ -14,10 +14,10 @@ enable_language(CUDA)
 
 add_subdirectory(abseil-cpp)
 
-add_executable(cuKING cuKING.cu)
+add_executable(cuking cuking.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
 
-target_link_libraries(cuKING
+target_link_libraries(cuking
     absl::flags
     absl::flags_parse
     zstd

@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+#include "cuking.h"
+
 ABSL_FLAG(std::string, sample_list, "",
           "A text file listing one .cuking.zst input file path per line.");
 ABSL_FLAG(
@@ -96,7 +98,7 @@ class ThreadPool {
 // RAII-style CUDA-managed array.
 template <typename T>
 struct CudaArray {
-  CudaArray(const size_t num_elements) : num_elements(num_elements) {
+  explicit CudaArray(const size_t num_elements) : num_elements(num_elements) {
     const auto err = cudaMallocManaged(&data, num_elements * sizeof(T));
     if (err) {
       std::cerr << "Error: can't allocate CUDA memory: "
@@ -105,7 +107,28 @@ struct CudaArray {
     }
   }
 
+  CudaArray &operator=(const CudaArray &) = delete;
+  CudaArray(const CudaArray &) = delete;
+
+  CudaArray(CudaArray &&other) {
+    data = other.data;
+    num_elements = other.num_elements;
+    other.data = nullptr;
+    other.num_elements = 0;
+  }
+
+  CudaArray &operator=(CudaArray &&other) {
+    if (this != &other) {
+      data = other.data;
+      num_elements = other.num_elements;
+      other.data = nullptr;
+      other.num_elements = 0;
+    }
+    return *this;
+  }
+
   ~CudaArray() {
+    std::cout << "freeing..." << std::endl;
     cudaFree(data);
     data = nullptr;
     num_elements = 0;
@@ -115,7 +138,12 @@ struct CudaArray {
   size_t num_elements;
 };
 
-using Sample = CudaArray<uint16_t>;
+struct Sample {
+  explicit Sample(const size_t num_entries) : entries(num_entries) {}
+
+  CudaArray<uint16_t> entries;
+  uint32_t num_hets = 0;
+};
 
 // Reads and decompresses sample data from `paths`, until either all paths
 // are read or the `max_total_size` has been reached. Callers should check the
@@ -180,13 +208,14 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       in.close();
 
       // Validate the file header.
-      static constexpr char magic[] = "CUK1";
+      cuking::FileHeader file_header;
       bool valid_header = true;
-      if (contents.size() < sizeof(magic) + sizeof(size_t)) {
+      if (contents.size() < sizeof(cuking::FileHeader)) {
         valid_header = false;
       } else {
-        for (size_t i = 0; i < sizeof(magic); ++i) {
-          if (contents[i] != magic[i]) {
+        memcpy(&file_header, contents.data(), sizeof(cuking::FileHeader));
+        for (size_t i = 0; i < sizeof(file_header.magic); ++i) {
+          if (file_header.magic[i] != cuking::kExpectedMagic[i]) {
             valid_header = false;
             break;
           }
@@ -205,16 +234,14 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       }
 
       // Decompress the contents.
-      size_t decompressed_size = 0;
-      memcpy(&decompressed_size, contents.data() + sizeof(magic),
-             sizeof(decompressed_size));
-
-      Sample sample(decompressed_size / sizeof(uint16_t));
+      Sample sample(file_header.decompressed_size / sizeof(uint16_t));
+      sample.num_hets = file_header.num_hets;
       const size_t zstd_result =
-          ZSTD_decompress(sample.data, decompressed_size,
-                          contents.data() + sizeof(magic) + sizeof(size_t),
-                          contents.size() - sizeof(magic) - sizeof(size_t));
-      if (ZSTD_isError(zstd_result)) {
+          ZSTD_decompress(sample.entries.data, file_header.decompressed_size,
+                          contents.data() + sizeof(cuking::FileHeader),
+                          contents.size() - sizeof(cuking::FileHeader));
+      if (ZSTD_isError(zstd_result) ||
+          zstd_result != file_header.decompressed_size) {
         {
           absl::MutexLock lock(&mutex);
           std::cerr << "Error: failed to decompress \"" << path << "\"."
@@ -228,8 +255,8 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       // Commit the result.
       {
         absl::MutexLock lock(&mutex);
-        if (total_size + decompressed_size <= max_total_size) {
-          total_size += decompressed_size;
+        if (total_size + file_header.decompressed_size <= max_total_size) {
+          total_size += file_header.decompressed_size;
           result->push_back(std::move(sample));
         }
         blocking_counter.DecrementCount();
@@ -241,7 +268,75 @@ bool ReadSamples(const absl::Span<std::string> &paths,
   return success;
 }
 
-float ComputeKing(const Sample &sample1, const Sample &sample2) { return 0.f; }
+inline uint32_t DecodeLocusDelta(const uint16_t value) { return value >> 2; }
+
+inline cuking::VariantCategory DecodeVariantCategory(const uint16_t value) {
+  return static_cast<cuking::VariantCategory>(value & 3);
+}
+
+float ComputeKing(const Sample &sample_i, const Sample &sample_j) {
+  // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
+  uint32_t num_both_het = 0, num_opposing_hom = 0;
+  for (uint32_t index_i = 0, index_j = 0,
+                pos_i = DecodeLocusDelta(sample_i.entries.data[0]),
+                pos_j = DecodeLocusDelta(sample_j.entries.data[0]);
+       pos_i != static_cast<uint32_t>(-1) ||
+       pos_j != static_cast<uint32_t>(-1);) {
+    if (pos_i < pos_j) {
+      if (DecodeVariantCategory(sample_i.entries.data[index_i]) ==
+          cuking::VariantCategory::kHomAlt) {
+        ++num_opposing_hom;
+      }
+
+      if (++index_i < sample_i.entries.num_elements) {
+        pos_i += DecodeLocusDelta(sample_i.entries.data[index_i]);
+      } else {
+        pos_i = static_cast<uint32_t>(-1);
+      }
+    }
+
+    if (pos_j < pos_i) {
+      if (DecodeVariantCategory(sample_j.entries.data[index_j]) ==
+          cuking::VariantCategory::kHomAlt) {
+        ++num_opposing_hom;
+      }
+
+      if (++index_j < sample_j.entries.num_elements) {
+        pos_j += DecodeLocusDelta(sample_j.entries.data[index_j]);
+      } else {
+        pos_j = static_cast<uint32_t>(-1);
+      }
+    }
+
+    if (pos_i == pos_j && pos_i != static_cast<uint32_t>(-1)) {
+      if (DecodeVariantCategory(sample_i.entries.data[index_i]) ==
+              cuking::VariantCategory::kHet &&
+          DecodeVariantCategory(sample_j.entries.data[index_j]) ==
+              cuking::VariantCategory::kHet) {
+        ++num_both_het;
+      }
+
+      if (++index_i < sample_i.entries.num_elements) {
+        pos_i += DecodeLocusDelta(sample_i.entries.data[index_i]);
+      } else {
+        pos_i = static_cast<uint32_t>(-1);
+      }
+
+      if (++index_j < sample_j.entries.num_elements) {
+        pos_j += DecodeLocusDelta(sample_j.entries.data[index_j]);
+      } else {
+        pos_j = static_cast<uint32_t>(-1);
+      }
+    }
+  }
+
+  // Return the "between-family" estimator.
+  return 0.5f + (2.f * num_both_het - 4.f * num_opposing_hom -
+                 sample_i.num_hets - sample_j.num_hets) /
+                    (4.f * std::min(sample_i.num_hets, sample_j.num_hets));
+
+  return 0.f;
+}
 
 }  // namespace
 

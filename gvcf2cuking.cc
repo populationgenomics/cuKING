@@ -4,6 +4,7 @@
 //
 // Example: ./gvcf2cuking --input=NA12878.g.vcf.gz --output=NA12878.cuking
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
@@ -17,6 +18,8 @@
 #include <string>
 #include <string_view>
 
+#include "cuking.h"
+
 ABSL_FLAG(std::string, input, "",
           "The GVCF input filename, e.g. NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
@@ -24,16 +27,10 @@ ABSL_FLAG(std::string, output, "",
 
 namespace {
 
-enum class VariantCategory {
-  kHet = 0,
-  kHomAlt = 1,
-  kSkip = 2,
-};
-
 constexpr uint16_t kMaxLocusDelta = (1 << 14) - 1;
 
 inline uint16_t Encode(const int64_t locus_delta,
-                       const VariantCategory variant_category) {
+                       const cuking::VariantCategory variant_category) {
   assert(locus_delta <= kMaxLocusDelta);
   return (locus_delta << 2) | static_cast<uint16_t>(variant_category);
 }
@@ -60,14 +57,18 @@ int main(int argc, char** argv) {
     std::cerr << "Error: could not open \"" << input_file << "\"." << std::endl;
     return 1;
   }
+  const absl::Cleanup hts_file_closer = [hts_file] { bcf_close(hts_file); };
 
-  bcf_hdr_t* const header = bcf_hdr_read(hts_file);
-  if (header == nullptr) {
+  bcf_hdr_t* const hts_header = bcf_hdr_read(hts_file);
+  if (hts_header == nullptr) {
     std::cerr << "Error: failed to read header." << std::endl;
     return 1;
   }
+  const absl::Cleanup hts_header_destroyer = [hts_header] {
+    bcf_hdr_destroy(hts_header);
+  };
 
-  const int num_samples = bcf_hdr_nsamples(header);
+  const int num_samples = bcf_hdr_nsamples(hts_header);
   if (num_samples != 1) {
     std::cerr << "Error: unexpected number of samples: " << num_samples
               << "; only single-sample GVCFs are supported." << std::endl;
@@ -75,11 +76,12 @@ int main(int argc, char** argv) {
   }
 
   int num_seqs = 0;
-  const auto seq_names = bcf_hdr_seqnames(header, &num_seqs);
+  const auto seq_names = bcf_hdr_seqnames(hts_header, &num_seqs);
   if (seq_names == nullptr) {
     std::cerr << "Error: failed to read sequence names." << std::endl;
     return 1;
   }
+  const absl::Cleanup seq_names_free = [seq_names] { free(seq_names); };
 
   // Used to convert to global position (for GRCh38).
   const absl::flat_hash_map<std::string_view, int64_t> chr_offsets = {
@@ -98,11 +100,14 @@ int main(int argc, char** argv) {
     std::cerr << "Error: failed to init record." << std::endl;
     return 1;
   }
+  const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
   int64_t last_position = -1, num_skips = 0, processed = 0;
+  uint32_t num_hets = 0;
   int* genotypes = nullptr;
+  const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
   std::vector<uint16_t> encoded;
-  while (bcf_read(hts_file, header, record) == 0) {
+  while (bcf_read(hts_file, hts_header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
       std::cout << "Processed " << (processed >> 20) << " Mi records, encoded "
                 << encoded.size() << " entries..." << std::endl;
@@ -122,7 +127,7 @@ int main(int argc, char** argv) {
     }
 
     int num_genotypes = 0;
-    if (bcf_get_format_int32(header, record, "GT", &genotypes,
+    if (bcf_get_format_int32(hts_header, record, "GT", &genotypes,
                              &num_genotypes) <= 0 ||
         num_genotypes != 2) {
       continue;  // GT not present or unexpected number of GT entries.
@@ -138,15 +143,17 @@ int main(int argc, char** argv) {
     int64_t locus_delta = global_position - last_position;
     // If the delta doesn't fit, add skips.
     while (locus_delta > kMaxLocusDelta) {
-      encoded.push_back(Encode(kMaxLocusDelta - 1, VariantCategory::kSkip));
+      encoded.push_back(
+          Encode(kMaxLocusDelta - 1, cuking::VariantCategory::kSkip));
       locus_delta -= kMaxLocusDelta - 1;
       ++num_skips;
     }
 
     if (num_ref_alleles == 1) {
-      encoded.push_back(Encode(locus_delta, VariantCategory::kHet));
+      encoded.push_back(Encode(locus_delta, cuking::VariantCategory::kHet));
+      ++num_hets;
     } else if (num_ref_alleles == 0) {
-      encoded.push_back(Encode(locus_delta, VariantCategory::kHomAlt));
+      encoded.push_back(Encode(locus_delta, cuking::VariantCategory::kHomAlt));
     }
 
     last_position = global_position;
@@ -154,13 +161,8 @@ int main(int argc, char** argv) {
 
   std::cout << "Stats:" << std::endl
             << "  entries: " << encoded.size() << std::endl
+            << "  hets: " << num_hets << std::endl
             << "  skips: " << num_skips << std::endl;
-
-  bcf_close(hts_file);
-  bcf_hdr_destroy(header);
-  bcf_destroy(record);
-  free(genotypes);
-  free(seq_names);
 
   // zstd-compress the result.
   const size_t encoded_byte_size = encoded.size() * sizeof(uint16_t);
@@ -178,10 +180,13 @@ int main(int argc, char** argv) {
 
   // Write the output file.
   std::ofstream out(output_file, std::ios::out | std::ios::binary);
-  static constexpr char magic[] = "CUK1";  // File type identifier.
-  out.write(magic, sizeof(magic));
-  out.write(reinterpret_cast<const char*>(&encoded_byte_size),
-            sizeof(encoded_byte_size));  // Decompressed size.
+  cuking::FileHeader file_header;
+  memcpy(file_header.magic, cuking::kExpectedMagic.data(),
+         sizeof(file_header.magic));
+  file_header.decompressed_size = encoded_byte_size;
+  file_header.num_hets = num_hets;
+  out.write(reinterpret_cast<const char*>(&file_header),
+            sizeof(cuking::FileHeader));  // Decompressed size.
   out.write(reinterpret_cast<const char*>(compressed.data()),
             compressed.size());  // Compressed data.
   out.close();
