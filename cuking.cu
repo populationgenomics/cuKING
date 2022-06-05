@@ -391,7 +391,7 @@ int main(int argc, char **argv) {
       result.data[i] = 0.f;
     }
 
-    ComputeKingKernel<<<num_samples, 64>>>(samples.data, result.data);
+    ComputeKingKernel<<<num_samples, 128>>>(samples.data, result.data);
 
     // Wait for GPU to finish before accessing on host.
     cudaDeviceSynchronize();
