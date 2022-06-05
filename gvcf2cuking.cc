@@ -22,6 +22,8 @@ ABSL_FLAG(std::string, input, "",
 ABSL_FLAG(std::string, output, "",
           "The cuking output filename, e.g. NA12878.cuking.zst");
 
+namespace {
+
 enum class VariantCategory {
   kHet = 0,
   kHomAlt = 1,
@@ -35,6 +37,8 @@ inline uint16_t Encode(const int64_t locus_delta,
   assert(locus_delta <= kMaxLocusDelta);
   return (locus_delta << 2) | static_cast<uint16_t>(variant_category);
 }
+
+}  // namespace
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
@@ -161,7 +165,7 @@ int main(int argc, char** argv) {
   // zstd-compress the result.
   const size_t encoded_byte_size = encoded.size() * sizeof(uint16_t);
   const size_t compress_bound = ZSTD_compressBound(encoded_byte_size);
-  std::vector<unsigned char> compressed(compress_bound);
+  std::vector<uint8_t> compressed(compress_bound);
   constexpr int kZstdCompressionLevel = 3;
   const size_t zstd_result =
       ZSTD_compress(compressed.data(), compressed.size(), encoded.data(),
@@ -174,8 +178,8 @@ int main(int argc, char** argv) {
 
   // Write the output file.
   std::ofstream out(output_file, std::ios::out | std::ios::binary);
-  out.write(reinterpret_cast<const char*>(encoded.data()),
-            encoded.size() * sizeof(uint16_t));
+  out.write(reinterpret_cast<const char*>(compressed.data()),
+            compressed.size());
   out.close();
 
   return 0;

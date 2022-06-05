@@ -7,6 +7,9 @@
 #include <string>
 #include <vector>
 
+ABSL_FLAG(std::string, sample_list, "",
+          "A text file listing one .cuking.zst input file path per line.");
+
 __global__ void add_kernel(int n, float *x, float *y) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   const int stride = blockDim.x * gridDim.x;
@@ -15,8 +18,11 @@ __global__ void add_kernel(int n, float *x, float *y) {
   }
 }
 
-ABSL_FLAG(std::string, sample_list, "",
-          "A text file listing one cuking path per line.");
+namespace {
+
+using Sample = std::vector<uint16_t>;
+
+}  // namespace
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
