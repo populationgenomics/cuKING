@@ -2,7 +2,7 @@
 //
 // Note: assumes alignment with GRCh38 to convert to global positions.
 //
-// Example: ./gvcf2cuking --input=NA12878.g.vcf.gz --output=NA12878.cuking.zst
+// Example: ./gvcf2cuking --input=NA12878.g.vcf.gz --output=NA12878.cuking
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
@@ -20,7 +20,7 @@
 ABSL_FLAG(std::string, input, "",
           "The GVCF input filename, e.g. NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
-          "The cuking output filename, e.g. NA12878.cuking.zst");
+          "The cuking output filename, e.g. NA12878.cuking");
 
 namespace {
 
@@ -178,8 +178,12 @@ int main(int argc, char** argv) {
 
   // Write the output file.
   std::ofstream out(output_file, std::ios::out | std::ios::binary);
+  static constexpr char magic[] = "CUK1";  // File type identifier.
+  out.write(magic, sizeof(magic));
+  out.write(reinterpret_cast<const char*>(&encoded_byte_size),
+            sizeof(encoded_byte_size));  // Decompressed size.
   out.write(reinterpret_cast<const char*>(compressed.data()),
-            compressed.size());
+            compressed.size());  // Compressed data.
   out.close();
 
   return 0;

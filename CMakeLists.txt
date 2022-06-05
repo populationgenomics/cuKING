@@ -20,6 +20,7 @@ add_executable(gvcf2cuking gvcf2cuking.cc)
 target_link_libraries(cuKING
     absl::flags
     absl::flags_parse
+    zstd
 )
 
 target_link_libraries(gvcf2cuking
