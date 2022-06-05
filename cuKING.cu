@@ -15,7 +15,7 @@
 
 ABSL_FLAG(std::string, sample_list, "",
           "A text file listing one .cuking.zst input file path per line.");
-ABSL_FLAG(int, num_reader_threads, 16,
+ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
 
 __global__ void add_kernel(int n, float *x, float *y) {
@@ -86,9 +86,31 @@ class ThreadPool {
   std::vector<std::thread> threads_;
 };
 
-using Sample = std::vector<uint16_t>;
+// RAII-style CUDA-managed array.
+template <typename T>
+struct CudaArray {
+  CudaArray(const size_t num_elements) : num_elements(num_elements) {
+    const auto err = cudaMallocManaged(&data, num_elements * sizeof(T));
+    if (err) {
+      std::cerr << "Error: can't allocate CUDA memory: "
+                << cudaGetErrorString(err) << std::endl;
+      exit(1);
+    }
+  }
 
-// Reads and decompresses sample buffers from `paths`, until either all paths
+  ~CudaArray() {
+    cudaFree(data);
+    data = nullptr;
+    num_elements = 0;
+  }
+
+  T *data = nullptr;
+  size_t num_elements;
+};
+
+using Sample = CudaArray<uint16_t>;
+
+// Reads and decompresses sample data from `paths`, until either all paths
 // are read or the `max_total_size` has been reached. Callers should check the
 // length of the `result` vector to determine how many samples have been read.
 // Returns false if any failures occurred.
@@ -137,8 +159,8 @@ bool ReadSamples(const std::vector<std::string> &paths,
       }
 
       // Read the entire file.
-      std::vector<uint8_t> buffer(file_size);
-      in.read(reinterpret_cast<char *>(buffer.data()), file_size);
+      std::vector<uint8_t> contents(file_size);
+      in.read(reinterpret_cast<char *>(contents.data()), file_size);
       if (!in) {
         {
           absl::MutexLock lock(&mutex);
@@ -153,11 +175,11 @@ bool ReadSamples(const std::vector<std::string> &paths,
       // Validate the file header.
       static constexpr char magic[] = "CUK1";
       bool valid_header = true;
-      if (buffer.size() < sizeof(magic) + sizeof(size_t)) {
+      if (contents.size() < sizeof(magic) + sizeof(size_t)) {
         valid_header = false;
       } else {
         for (size_t i = 0; i < sizeof(magic); ++i) {
-          if (buffer[i] != magic[i]) {
+          if (contents[i] != magic[i]) {
             valid_header = false;
             break;
           }
@@ -177,14 +199,14 @@ bool ReadSamples(const std::vector<std::string> &paths,
 
       // Decompress the contents.
       size_t decompressed_size = 0;
-      memcpy(&decompressed_size, buffer.data() + sizeof(magic),
+      memcpy(&decompressed_size, contents.data() + sizeof(magic),
              sizeof(decompressed_size));
 
-      Sample sample(decompressed_size);
+      Sample sample(decompressed_size / sizeof(uint16_t));
       const size_t zstd_result =
-          ZSTD_decompress(sample.data(), decompressed_size,
-                          buffer.data() + sizeof(magic) + sizeof(size_t),
-                          buffer.size() - sizeof(magic) - sizeof(size_t));
+          ZSTD_decompress(sample.data, decompressed_size,
+                          contents.data() + sizeof(magic) + sizeof(size_t),
+                          contents.size() - sizeof(magic) - sizeof(size_t));
       if (ZSTD_isError(zstd_result)) {
         {
           absl::MutexLock lock(&mutex);
@@ -244,30 +266,20 @@ int main(int argc, char **argv) {
   std::cout << "Read " << samples.size() << " samples." << std::endl;
 
   constexpr int N = 1 << 20;
-  float *x = nullptr, *y = nullptr;
 
   // Allocate Unified Memory – accessible from CPU or GPU.
-  if (const auto err = cudaMallocManaged(&x, N * sizeof(float)); err) {
-    std::cerr << "Error: can't allocate memory: " << cudaGetErrorString(err)
-              << std::endl;
-    return 1;
-  }
-  if (const auto err = cudaMallocManaged(&y, N * sizeof(float)); err) {
-    std::cerr << "Error: can't allocate memory: " << cudaGetErrorString(err)
-              << std::endl;
-    return 1;
-  }
+  CudaArray<float> x(N), y(N);
 
   // Initialize x and y arrays on the host.
   for (int i = 0; i < N; i++) {
-    x[i] = 1.0f;
-    y[i] = 2.0f;
+    x.data[i] = 1.0f;
+    y.data[i] = 2.0f;
   }
 
   // Run kernel on 1M elements on the GPU.
   constexpr int blockSize = 256;
   constexpr int numBlocks = (N + blockSize - 1) / blockSize;
-  add_kernel<<<numBlocks, blockSize>>>(N, x, y);
+  add_kernel<<<numBlocks, blockSize>>>(N, x.data, y.data);
 
   // Wait for GPU to finish before accessing on host.
   cudaDeviceSynchronize();
@@ -275,12 +287,9 @@ int main(int argc, char **argv) {
   // Check for errors (all values should be 3.0f).
   float maxError = 0.0f;
   for (int i = 0; i < N; i++) {
-    maxError = std::fmax(maxError, std::fabs(y[i] - 3.0f));
+    maxError = std::fmax(maxError, std::fabs(y.data[i] - 3.0f));
   }
   std::cout << "Max error: " << maxError << std::endl;
-
-  cudaFree(x);
-  cudaFree(y);
 
   return 0;
 }
