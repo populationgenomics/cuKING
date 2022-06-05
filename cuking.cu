@@ -348,8 +348,15 @@ int main(int argc, char **argv) {
 
   for (size_t i = 0; i < samples.size() - 1; ++i) {
     for (size_t j = i + 1; j < samples.size(); ++j) {
+      const float king_coeff = ComputeKing(*samples[i], *samples[j]);
       std::cout << "KING coefficient between " << i << " and " << j << ": "
-                << ComputeKing(*samples[i], *samples[j]) << std::endl;
+                << king_coeff;
+      // Cut off at third degree (https://www.kingrelatedness.com/manual.shtml).
+      constexpr float kKingCutoff = 0.0884f;
+      if (king_coeff < kKingCutoff) {
+        std::cout << " (unrelated)";
+      }
+      std::cout << std::endl;
     }
   }
 
