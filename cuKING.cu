@@ -99,7 +99,7 @@ bool ReadSamples(const std::vector<std::string> &paths,
   size_t total_size = 0;
   absl::Mutex mutex;
   absl::BlockingCounter blocking_counter(paths.size());
-  bool errors = false;
+  bool success = true ABSL_GUARDED_BY(mutex);
   for (const std::string &path : paths) {
     thread_pool->Schedule([&] {
       // Early-out if we've already read too much.
@@ -115,11 +115,11 @@ bool ReadSamples(const std::vector<std::string> &paths,
       std::error_code error_code;
       const size_t file_size = std::filesystem::file_size(path, error_code);
       if (error_code) {
-        std::cerr << "Error: failed to determine size of \"" << path
-                  << "\": " << error_code << std::endl;
         {
           absl::MutexLock lock(&mutex);
-          errors = true;
+          std::cerr << "Error: failed to determine size of \"" << path
+                    << "\": " << error_code << std::endl;
+          success = false;
         }
         blocking_counter.DecrementCount();
         return;
@@ -127,10 +127,10 @@ bool ReadSamples(const std::vector<std::string> &paths,
 
       std::ifstream in(path, std::ifstream::binary);
       if (!in) {
-        std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
         {
           absl::MutexLock lock(&mutex);
-          errors = true;
+          std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
+          success = false;
         }
         blocking_counter.DecrementCount();
         return;
@@ -140,10 +140,10 @@ bool ReadSamples(const std::vector<std::string> &paths,
       std::vector<uint8_t> buffer(file_size);
       in.read(reinterpret_cast<char *>(buffer.data()), file_size);
       if (!in) {
-        std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
         {
           absl::MutexLock lock(&mutex);
-          errors = true;
+          std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
+          success = false;
         }
         blocking_counter.DecrementCount();
         return;
@@ -165,11 +165,11 @@ bool ReadSamples(const std::vector<std::string> &paths,
       }
 
       if (!valid_header) {
-        std::cerr << "Error: failed to validate header for \"" << path << "\"."
-                  << std::endl;
         {
           absl::MutexLock lock(&mutex);
-          errors = true;
+          std::cerr << "Error: failed to validate header for \"" << path
+                    << "\"." << std::endl;
+          success = false;
         }
         blocking_counter.DecrementCount();
         return;
@@ -186,11 +186,11 @@ bool ReadSamples(const std::vector<std::string> &paths,
                           buffer.data() + sizeof(magic) + sizeof(size_t),
                           buffer.size() - sizeof(magic) - sizeof(size_t));
       if (ZSTD_isError(zstd_result)) {
-        std::cerr << "Error: failed to decompress \"" << path << "\"."
-                  << std::endl;
         {
           absl::MutexLock lock(&mutex);
-          errors = true;
+          std::cerr << "Error: failed to decompress \"" << path << "\"."
+                    << std::endl;
+          success = false;
         }
         blocking_counter.DecrementCount();
         return;
@@ -209,7 +209,7 @@ bool ReadSamples(const std::vector<std::string> &paths,
   }
 
   blocking_counter.Wait();
-  return errors;
+  return success;
 }
 
 }  // namespace
@@ -244,11 +244,19 @@ int main(int argc, char **argv) {
   std::cout << "Read " << samples.size() << " samples." << std::endl;
 
   constexpr int N = 1 << 20;
-  float *x, *y;
+  float *x = nullptr, *y = nullptr;
 
   // Allocate Unified Memory – accessible from CPU or GPU.
-  cudaMallocManaged(&x, N * sizeof(float));
-  cudaMallocManaged(&y, N * sizeof(float));
+  if (const auto err = cudaMallocManaged(&x, N * sizeof(float)); err) {
+    std::cerr << "Error: can't allocate memory: " << cudaGetErrorString(err)
+              << std::endl;
+    return 1;
+  }
+  if (const auto err = cudaMallocManaged(&y, N * sizeof(float)); err) {
+    std::cerr << "Error: can't allocate memory: " << cudaGetErrorString(err)
+              << std::endl;
+    return 1;
+  }
 
   // Initialize x and y arrays on the host.
   for (int i = 0; i < N; i++) {
