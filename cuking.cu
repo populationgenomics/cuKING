@@ -315,13 +315,15 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
 }
 
 __global__ void ComputeKingKernel(const Sample *const samples,
-                                  float *const result) {
-  const int i = blockIdx.x;
-  const int stride = blockDim.x;
-  const int num_samples = gridDim.x;
-  for (int j = i + 1 + threadIdx.x; j < num_samples; j += stride) {
-    result[i * num_samples + j] = ComputeKing(samples[i], samples[j]);
+                                  const int num_samples, float *const result) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  // TODO: upper triangular mappping.
+  const int i = index / num_samples;
+  const int j = index % num_samples;
+  if (i >= num_samples) {
+    return;
   }
+  result[i * num_samples + j] = ComputeKing(samples[i], samples[j]);
 }
 
 }  // namespace
@@ -391,7 +393,12 @@ int main(int argc, char **argv) {
       result.data[i] = 0.f;
     }
 
-    ComputeKingKernel<<<num_samples, 128>>>(samples.data, result.data);
+    constexpr int kCudaBlockSize = 256;
+    // TODO: upper triangular mappping.
+    const int kNumCudaBlocks =
+        (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
+    ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
+        samples.data, num_samples, result.data);
 
     // Wait for GPU to finish before accessing on host.
     cudaDeviceSynchronize();
