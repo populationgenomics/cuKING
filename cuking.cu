@@ -303,8 +303,6 @@ float ComputeKing(const Sample &sample_i, const Sample &sample_j) {
   return 0.5f + (2.f * num_both_het - 4.f * num_opposing_hom -
                  sample_i.num_hets - sample_j.num_hets) /
                     (4.f * std::min(sample_i.num_hets, sample_j.num_hets));
-
-  return 0.f;
 }
 
 }  // namespace
