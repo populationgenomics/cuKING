@@ -3,6 +3,7 @@
 #include <absl/flags/parse.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <absl/synchronization/mutex.h>
+#include <absl/time/time.h>
 #include <absl/types/span.h>
 #include <zstd.h>
 
@@ -27,17 +28,10 @@ ABSL_FLAG(
     "The exclusive index of the last sample to consider in the sample list.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
-
-__global__ void add_kernel(int n, float *x, float *y) {
-  const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = blockDim.x * gridDim.x;
-  for (int i = index; i < n; i += stride) {
-    y[i] = x[i] + y[i];
-  }
-}
+ABSL_FLAG(bool, run_on_cpu, false,
+          "Whether to run computation on CPU, useful for validation.");
 
 namespace {
-
 // Adapted from the Abseil thread pool.
 class ThreadPool {
  public:
@@ -245,13 +239,17 @@ bool ReadSamples(const absl::Span<std::string> &paths,
   return success;
 }
 
-inline uint32_t DecodeLocusDelta(const uint16_t value) { return value >> 2; }
+__device__ __host__ inline uint32_t DecodeLocusDelta(const uint16_t value) {
+  return value >> 2;
+}
 
-inline cuking::VariantCategory DecodeVariantCategory(const uint16_t value) {
+__device__ __host__ inline cuking::VariantCategory DecodeVariantCategory(
+    const uint16_t value) {
   return static_cast<cuking::VariantCategory>(value & 3);
 }
 
-float ComputeKing(const Sample &sample_i, const Sample &sample_j) {
+__device__ __host__ float ComputeKing(const Sample &sample_i,
+                                      const Sample &sample_j) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
   uint32_t num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t index_i = 0, index_j = 0,
@@ -308,9 +306,22 @@ float ComputeKing(const Sample &sample_i, const Sample &sample_j) {
   }
 
   // Return the "between-family" estimator.
+  const uint32_t min_hets = sample_i.num_hets < sample_j.num_hets
+                                ? sample_i.num_hets
+                                : sample_j.num_hets;
   return 0.5f + (2.f * num_both_het - 4.f * num_opposing_hom -
                  sample_i.num_hets - sample_j.num_hets) /
-                    (4.f * std::min(sample_i.num_hets, sample_j.num_hets));
+                    (4.f * min_hets);
+}
+
+__global__ void ComputeKingKernel(const Sample *const samples,
+                                  float *const result) {
+  const int i = blockIdx.x;
+  const int stride = blockDim.x;
+  const int num_samples = gridDim.x;
+  for (int j = i + 1 + threadIdx.x; j < num_samples; j += stride) {
+    result[i * num_samples + j] = ComputeKing(samples[i], samples[j]);
+  }
 }
 
 }  // namespace
@@ -355,45 +366,42 @@ int main(int argc, char **argv) {
   std::cout << "Read " << num_samples << " samples." << std::endl;
 
   const auto &samples = read_samples_result.samples;
-  for (size_t i = 0; i < num_samples - 1; ++i) {
-    for (size_t j = i + 1; j < num_samples; ++j) {
-      const float king_coeff = ComputeKing(samples.data[i], samples.data[j]);
-      std::cout << "KING coefficient between " << i << " and " << j << ": "
-                << king_coeff;
-      // Cut off at third degree (https://www.kingrelatedness.com/manual.shtml).
-      constexpr float kKingCutoff = 0.0884f;
-      if (king_coeff < kKingCutoff) {
-        std::cout << " (unrelated)";
+
+  if (absl::GetFlag(FLAGS_run_on_cpu)) {
+    for (size_t i = 0; i < num_samples - 1; ++i) {
+      for (size_t j = i + 1; j < num_samples; ++j) {
+        const absl::Time time_before = absl::Now();
+        const float king_coeff = ComputeKing(samples.data[i], samples.data[j]);
+        const absl::Time time_after = absl::Now();
+        std::cout << "KING coefficient between " << i << " and " << j << ": "
+                  << king_coeff << " (took " << (time_after - time_before)
+                  << ")";
+        // Cut off at third degree
+        // (https://www.kingrelatedness.com/manual.shtml).
+        constexpr float kKingCutoff = 0.0884f;
+        if (king_coeff < kKingCutoff) {
+          std::cout << " (unrelated)";
+        }
+        std::cout << std::endl;
       }
-      std::cout << std::endl;
+    }
+  } else {
+    CudaArray<float> result(num_samples * num_samples);
+    for (size_t i = 0; i < result.num_elements; ++i) {
+      result.data[i] = 0.f;
+    }
+
+    ComputeKingKernel<<<num_samples, 64>>>(samples.data, result.data);
+
+    // Wait for GPU to finish before accessing on host.
+    cudaDeviceSynchronize();
+
+    for (size_t i = 0; i < num_samples - 1; ++i) {
+      for (size_t j = i + 1; j < num_samples; ++j) {
+        std::cout << result.data[i * num_samples + j] << std::endl;
+      }
     }
   }
-
-  constexpr int N = 1 << 20;
-
-  // Allocate Unified Memory – accessible from CPU or GPU.
-  CudaArray<float> x(N), y(N);
-
-  // Initialize x and y arrays on the host.
-  for (int i = 0; i < N; i++) {
-    x.data[i] = 1.0f;
-    y.data[i] = 2.0f;
-  }
-
-  // Run kernel on 1M elements on the GPU.
-  constexpr int blockSize = 256;
-  constexpr int numBlocks = (N + blockSize - 1) / blockSize;
-  add_kernel<<<numBlocks, blockSize>>>(N, x.data, y.data);
-
-  // Wait for GPU to finish before accessing on host.
-  cudaDeviceSynchronize();
-
-  // Check for errors (all values should be 3.0f).
-  float maxError = 0.0f;
-  for (int i = 0; i < N; i++) {
-    maxError = std::fmax(maxError, std::fabs(y.data[i] - 3.0f));
-  }
-  std::cout << "Max error: " << maxError << std::endl;
 
   return 0;
 }
