@@ -3,6 +3,7 @@
 #include <absl/flags/parse.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <absl/synchronization/mutex.h>
+#include <absl/types/span.h>
 #include <zstd.h>
 
 #include <filesystem>
@@ -15,6 +16,12 @@
 
 ABSL_FLAG(std::string, sample_list, "",
           "A text file listing one .cuking.zst input file path per line.");
+ABSL_FLAG(
+    size_t, sample_range_begin, 0,
+    "The inclusive index of the first sample to consider in the sample list.");
+ABSL_FLAG(
+    size_t, sample_range_end, 0,
+    "The exclusive index of the last sample to consider in the sample list.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
 
@@ -114,7 +121,7 @@ using Sample = CudaArray<uint16_t>;
 // are read or the `max_total_size` has been reached. Callers should check the
 // length of the `result` vector to determine how many samples have been read.
 // Returns false if any failures occurred.
-bool ReadSamples(const std::vector<std::string> &paths,
+bool ReadSamples(const absl::Span<std::string> &paths,
                  const size_t max_total_size, ThreadPool *const thread_pool,
                  std::vector<Sample> *const result) {
   result->clear();
@@ -234,6 +241,8 @@ bool ReadSamples(const std::vector<std::string> &paths,
   return success;
 }
 
+float ComputeKing(const Sample &sample1, const Sample &sample2) { return 0.f; }
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -255,15 +264,33 @@ int main(int argc, char **argv) {
     sample_paths.push_back(line);
   }
 
+  const size_t sample_range_begin = absl::GetFlag(FLAGS_sample_range_begin);
+  const size_t sample_range_end = absl::GetFlag(FLAGS_sample_range_end);
+  if (sample_range_begin >= sample_range_end ||
+      sample_range_end > sample_paths.size()) {
+    std::cerr << "Error: invalid sample range specified." << std::endl;
+    return 1;
+  }
+
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
   std::vector<Sample> samples;
-  if (!ReadSamples(sample_paths, static_cast<size_t>(-1), &thread_pool,
+  const auto sample_paths_span =
+      absl::MakeSpan(sample_paths)
+          .subspan(sample_range_begin, sample_range_end - sample_range_begin);
+  if (!ReadSamples(sample_paths_span, static_cast<size_t>(-1), &thread_pool,
                    &samples)) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
   }
 
   std::cout << "Read " << samples.size() << " samples." << std::endl;
+
+  for (size_t i = 0; i < samples.size() - 1; ++i) {
+    for (size_t j = i + 1; j < samples.size(); ++j) {
+      std::cout << "KING coefficient between " << i << " and " << j << ": "
+                << ComputeKing(samples[i], samples[j]) << std::endl;
+    }
+  }
 
   constexpr int N = 1 << 20;
 
