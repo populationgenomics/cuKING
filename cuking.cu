@@ -139,19 +139,25 @@ struct CudaArray {
 };
 
 struct Sample {
-  explicit Sample(const size_t num_entries) : entries(num_entries) {}
-
-  CudaArray<uint16_t> entries;
+  const uint16_t *entries = nullptr;  // Not owned.
+  uint32_t num_entries = 0;
   uint32_t num_hets = 0;
+};
+
+struct ReadSamplesResult {
+  explicit ReadSamplesResult(size_t num_samples) : samples(num_samples) {}
+  CudaArray<Sample> samples;
+  std::vector<std::unique_ptr<CudaArray<uint16_t>>> buffers;
 };
 
 // Reads and decompresses sample data from `paths`, adding entries with
 // corresponding index into `result`.  Returns false if any failures occurred.
 bool ReadSamples(const absl::Span<std::string> &paths,
                  ThreadPool *const thread_pool,
-                 std::vector<std::unique_ptr<Sample>> *const result) {
-  result->clear();
-  result->resize(paths.size());
+                 ReadSamplesResult *const result) {
+  result->samples = CudaArray<Sample>(paths.size());
+  result->buffers.clear();
+  result->buffers.resize(paths.size());
 
   absl::BlockingCounter blocking_counter(paths.size());
   std::atomic<bool> success(true);
@@ -212,13 +218,16 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       }
 
       // Decompress the contents.
-      auto sample = std::make_unique<Sample>(file_header.decompressed_size /
-                                             sizeof(uint16_t));
-      sample->num_hets = file_header.num_hets;
-      const size_t zstd_result =
-          ZSTD_decompress(sample->entries.data, file_header.decompressed_size,
-                          contents.data() + sizeof(cuking::FileHeader),
-                          contents.size() - sizeof(cuking::FileHeader));
+      result->buffers[i] = std::make_unique<CudaArray<uint16_t>>(
+          file_header.decompressed_size / sizeof(uint16_t));
+      auto &sample = result->samples.data[i];
+      sample.entries = result->buffers[i]->data;
+      sample.num_entries = result->buffers[i]->num_elements;
+      sample.num_hets = file_header.num_hets;
+      const size_t zstd_result = ZSTD_decompress(
+          result->buffers[i]->data, file_header.decompressed_size,
+          contents.data() + sizeof(cuking::FileHeader),
+          contents.size() - sizeof(cuking::FileHeader));
       if (ZSTD_isError(zstd_result) ||
           zstd_result != file_header.decompressed_size) {
         std::cerr << "Error: failed to decompress \"" << path << "\"."
@@ -228,7 +237,6 @@ bool ReadSamples(const absl::Span<std::string> &paths,
         return;
       }
 
-      (*result)[i] = std::move(sample);
       blocking_counter.DecrementCount();
     });
   }
@@ -247,52 +255,52 @@ float ComputeKing(const Sample &sample_i, const Sample &sample_j) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
   uint32_t num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t index_i = 0, index_j = 0,
-                pos_i = DecodeLocusDelta(sample_i.entries.data[0]),
-                pos_j = DecodeLocusDelta(sample_j.entries.data[0]);
+                pos_i = DecodeLocusDelta(sample_i.entries[0]),
+                pos_j = DecodeLocusDelta(sample_j.entries[0]);
        pos_i != static_cast<uint32_t>(-1) ||
        pos_j != static_cast<uint32_t>(-1);) {
     if (pos_i < pos_j) {
-      if (DecodeVariantCategory(sample_i.entries.data[index_i]) ==
+      if (DecodeVariantCategory(sample_i.entries[index_i]) ==
           cuking::VariantCategory::kHomAlt) {
         ++num_opposing_hom;
       }
 
-      if (++index_i < sample_i.entries.num_elements) {
-        pos_i += DecodeLocusDelta(sample_i.entries.data[index_i]);
+      if (++index_i < sample_i.num_entries) {
+        pos_i += DecodeLocusDelta(sample_i.entries[index_i]);
       } else {
         pos_i = static_cast<uint32_t>(-1);
       }
     }
 
     if (pos_j < pos_i) {
-      if (DecodeVariantCategory(sample_j.entries.data[index_j]) ==
+      if (DecodeVariantCategory(sample_j.entries[index_j]) ==
           cuking::VariantCategory::kHomAlt) {
         ++num_opposing_hom;
       }
 
-      if (++index_j < sample_j.entries.num_elements) {
-        pos_j += DecodeLocusDelta(sample_j.entries.data[index_j]);
+      if (++index_j < sample_j.num_entries) {
+        pos_j += DecodeLocusDelta(sample_j.entries[index_j]);
       } else {
         pos_j = static_cast<uint32_t>(-1);
       }
     }
 
     if (pos_i == pos_j && pos_i != static_cast<uint32_t>(-1)) {
-      if (DecodeVariantCategory(sample_i.entries.data[index_i]) ==
+      if (DecodeVariantCategory(sample_i.entries[index_i]) ==
               cuking::VariantCategory::kHet &&
-          DecodeVariantCategory(sample_j.entries.data[index_j]) ==
+          DecodeVariantCategory(sample_j.entries[index_j]) ==
               cuking::VariantCategory::kHet) {
         ++num_both_het;
       }
 
-      if (++index_i < sample_i.entries.num_elements) {
-        pos_i += DecodeLocusDelta(sample_i.entries.data[index_i]);
+      if (++index_i < sample_i.num_entries) {
+        pos_i += DecodeLocusDelta(sample_i.entries[index_i]);
       } else {
         pos_i = static_cast<uint32_t>(-1);
       }
 
-      if (++index_j < sample_j.entries.num_elements) {
-        pos_j += DecodeLocusDelta(sample_j.entries.data[index_j]);
+      if (++index_j < sample_j.num_entries) {
+        pos_j += DecodeLocusDelta(sample_j.entries[index_j]);
       } else {
         pos_j = static_cast<uint32_t>(-1);
       }
@@ -334,21 +342,22 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
-  std::vector<std::unique_ptr<Sample>> samples;
+  const size_t num_samples = sample_range_end - sample_range_begin;
   const auto sample_paths_span =
-      absl::MakeSpan(sample_paths)
-          .subspan(sample_range_begin, sample_range_end - sample_range_begin);
-  if (!ReadSamples(sample_paths_span, &thread_pool, &samples)) {
+      absl::MakeSpan(sample_paths).subspan(sample_range_begin, num_samples);
+  ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
+  ReadSamplesResult read_samples_result(sample_paths_span.size());
+  if (!ReadSamples(sample_paths_span, &thread_pool, &read_samples_result)) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
   }
 
-  std::cout << "Read " << samples.size() << " samples." << std::endl;
+  std::cout << "Read " << num_samples << " samples." << std::endl;
 
-  for (size_t i = 0; i < samples.size() - 1; ++i) {
-    for (size_t j = i + 1; j < samples.size(); ++j) {
-      const float king_coeff = ComputeKing(*samples[i], *samples[j]);
+  const auto &samples = read_samples_result.samples;
+  for (size_t i = 0; i < num_samples - 1; ++i) {
+    for (size_t j = i + 1; j < num_samples; ++j) {
+      const float king_coeff = ComputeKing(samples.data[i], samples.data[j]);
       std::cout << "KING coefficient between " << i << " and " << j << ": "
                 << king_coeff;
       // Cut off at third degree (https://www.kingrelatedness.com/manual.shtml).
