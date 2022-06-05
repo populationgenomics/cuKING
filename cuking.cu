@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <queue>
 #include <string>
 #include <thread>
@@ -128,14 +129,13 @@ struct CudaArray {
   }
 
   ~CudaArray() {
-    std::cout << "freeing..." << std::endl;
     cudaFree(data);
     data = nullptr;
     num_elements = 0;
   }
 
   T *data = nullptr;
-  size_t num_elements;
+  size_t num_elements = 0;
 };
 
 struct Sample {
@@ -145,50 +145,34 @@ struct Sample {
   uint32_t num_hets = 0;
 };
 
-// Reads and decompresses sample data from `paths`, until either all paths
-// are read or the `max_total_size` has been reached. Callers should check the
-// length of the `result` vector to determine how many samples have been read.
-// Returns false if any failures occurred.
+// Reads and decompresses sample data from `paths`, adding entries with
+// corresponding index into `result`.  Returns false if any failures occurred.
 bool ReadSamples(const absl::Span<std::string> &paths,
-                 const size_t max_total_size, ThreadPool *const thread_pool,
-                 std::vector<Sample> *const result) {
+                 ThreadPool *const thread_pool,
+                 std::vector<std::unique_ptr<Sample>> *const result) {
   result->clear();
-  size_t total_size = 0;
-  absl::Mutex mutex;
-  absl::BlockingCounter blocking_counter(paths.size());
-  bool success = true ABSL_GUARDED_BY(mutex);
-  for (const std::string &path : paths) {
-    thread_pool->Schedule([&] {
-      // Early-out if we've already read too much.
-      {
-        absl::MutexLock lock(&mutex);
-        if (total_size >= max_total_size) {
-          blocking_counter.DecrementCount();
-          return;
-        }
-      }
+  result->resize(paths.size());
 
+  absl::BlockingCounter blocking_counter(paths.size());
+  std::atomic<bool> success(true);
+  for (size_t i = 0; i < paths.size(); ++i) {
+    thread_pool->Schedule([&, i] {
+      const auto &path = paths[i];
       // Determine the file size.
       std::error_code error_code;
       const size_t file_size = std::filesystem::file_size(path, error_code);
       if (error_code) {
-        {
-          absl::MutexLock lock(&mutex);
-          std::cerr << "Error: failed to determine size of \"" << path
-                    << "\": " << error_code << std::endl;
-          success = false;
-        }
+        std::cerr << "Error: failed to determine size of \"" << path
+                  << "\": " << error_code << std::endl;
+        success = false;
         blocking_counter.DecrementCount();
         return;
       }
 
       std::ifstream in(path, std::ifstream::binary);
       if (!in) {
-        {
-          absl::MutexLock lock(&mutex);
-          std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
-          success = false;
-        }
+        std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
+        success = false;
         blocking_counter.DecrementCount();
         return;
       }
@@ -197,11 +181,8 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       std::vector<uint8_t> contents(file_size);
       in.read(reinterpret_cast<char *>(contents.data()), file_size);
       if (!in) {
-        {
-          absl::MutexLock lock(&mutex);
-          std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
-          success = false;
-        }
+        std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
+        success = false;
         blocking_counter.DecrementCount();
         return;
       }
@@ -223,44 +204,32 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       }
 
       if (!valid_header) {
-        {
-          absl::MutexLock lock(&mutex);
-          std::cerr << "Error: failed to validate header for \"" << path
-                    << "\"." << std::endl;
-          success = false;
-        }
+        std::cerr << "Error: failed to validate header for \"" << path << "\"."
+                  << std::endl;
+        success = false;
         blocking_counter.DecrementCount();
         return;
       }
 
       // Decompress the contents.
-      Sample sample(file_header.decompressed_size / sizeof(uint16_t));
-      sample.num_hets = file_header.num_hets;
+      auto sample = std::make_unique<Sample>(file_header.decompressed_size /
+                                             sizeof(uint16_t));
+      sample->num_hets = file_header.num_hets;
       const size_t zstd_result =
-          ZSTD_decompress(sample.entries.data, file_header.decompressed_size,
+          ZSTD_decompress(sample->entries.data, file_header.decompressed_size,
                           contents.data() + sizeof(cuking::FileHeader),
                           contents.size() - sizeof(cuking::FileHeader));
       if (ZSTD_isError(zstd_result) ||
           zstd_result != file_header.decompressed_size) {
-        {
-          absl::MutexLock lock(&mutex);
-          std::cerr << "Error: failed to decompress \"" << path << "\"."
-                    << std::endl;
-          success = false;
-        }
+        std::cerr << "Error: failed to decompress \"" << path << "\"."
+                  << std::endl;
+        success = false;
         blocking_counter.DecrementCount();
         return;
       }
 
-      // Commit the result.
-      {
-        absl::MutexLock lock(&mutex);
-        if (total_size + file_header.decompressed_size <= max_total_size) {
-          total_size += file_header.decompressed_size;
-          result->push_back(std::move(sample));
-        }
-        blocking_counter.DecrementCount();
-      }
+      (*result)[i] = std::move(sample);
+      blocking_counter.DecrementCount();
     });
   }
 
@@ -368,12 +337,11 @@ int main(int argc, char **argv) {
   }
 
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
-  std::vector<Sample> samples;
+  std::vector<std::unique_ptr<Sample>> samples;
   const auto sample_paths_span =
       absl::MakeSpan(sample_paths)
           .subspan(sample_range_begin, sample_range_end - sample_range_begin);
-  if (!ReadSamples(sample_paths_span, static_cast<size_t>(-1), &thread_pool,
-                   &samples)) {
+  if (!ReadSamples(sample_paths_span, &thread_pool, &samples)) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
   }
@@ -383,7 +351,7 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < samples.size() - 1; ++i) {
     for (size_t j = i + 1; j < samples.size(); ++j) {
       std::cout << "KING coefficient between " << i << " and " << j << ": "
-                << ComputeKing(samples[i], samples[j]) << std::endl;
+                << ComputeKing(*samples[i], *samples[j]) << std::endl;
     }
   }
 
