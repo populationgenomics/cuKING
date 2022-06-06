@@ -393,7 +393,7 @@ int main(int argc, char **argv) {
       result.data[i] = 0.f;
     }
 
-    constexpr int kCudaBlockSize = 256;
+    constexpr int kCudaBlockSize = 1024;
     // TODO: upper triangular mappping.
     const int kNumCudaBlocks =
         (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
