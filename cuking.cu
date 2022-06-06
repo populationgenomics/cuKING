@@ -405,11 +405,13 @@ int main(int argc, char **argv) {
 
     const absl::Time time_after = absl::Now();
 
+    /*
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
         std::cout << result.data[i * num_samples + j] << std::endl;
       }
     }
+    */
 
     std::cout << "CUDA kernel time: " << (time_after - time_before)
               << std::endl;
