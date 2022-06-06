@@ -24,6 +24,8 @@ ABSL_FLAG(std::string, input, "",
           "The GVCF input filename, e.g. NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
           "The cuking output filename, e.g. NA12878.cuking");
+ABSL_FLAG(float, downsample_fraction, 0.1f,
+          "The fraction of variants to retain.");
 
 namespace {
 
@@ -95,6 +97,11 @@ int main(int argc, char** argv) {
       {"chr22", 2824183054}, {"chrX", 2875001522},  {"chrY", 3031042417},
   };
 
+  // To implement globally consistent filtering across samples, we select loci
+  // deterministically using a modulo operation.
+  const int64_t downsample_mod = static_cast<int64_t>(
+      std::round(1.f / absl::GetFlag(FLAGS_downsample_fraction)));
+
   bcf1_t* const record = bcf_init();
   if (record == nullptr) {
     std::cerr << "Error: failed to init record." << std::endl;
@@ -124,6 +131,10 @@ int main(int argc, char** argv) {
                 << seq_names[record->rid] << ", " << record->pos << ")."
                 << std::endl;
       return 1;
+    }
+
+    if (global_position % downsample_mod != 0) {
+      continue;
     }
 
     int num_genotypes = 0;

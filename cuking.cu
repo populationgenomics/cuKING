@@ -317,10 +317,9 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
 __global__ void ComputeKingKernel(const Sample *const samples,
                                   const int num_samples, float *const result) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  // TODO: upper triangular mappping.
   const int i = index / num_samples;
   const int j = index % num_samples;
-  if (i >= num_samples) {
+  if (i >= num_samples || i >= j) {
     return;
   }
   result[i * num_samples + j] = ComputeKing(samples[i], samples[j]);
@@ -393,8 +392,9 @@ int main(int argc, char **argv) {
       result.data[i] = 0.f;
     }
 
+    const absl::Time time_before = absl::Now();
+
     constexpr int kCudaBlockSize = 1024;
-    // TODO: upper triangular mappping.
     const int kNumCudaBlocks =
         (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
     ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
@@ -403,11 +403,16 @@ int main(int argc, char **argv) {
     // Wait for GPU to finish before accessing on host.
     cudaDeviceSynchronize();
 
+    const absl::Time time_after = absl::Now();
+
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
         std::cout << result.data[i * num_samples + j] << std::endl;
       }
     }
+
+    std::cout << "CUDA kernel time: " << (time_after - time_before)
+              << std::endl;
   }
 
   return 0;
