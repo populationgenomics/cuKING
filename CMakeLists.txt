@@ -12,7 +12,7 @@ add_compile_options(-Wall)
 
 enable_language(CUDA)
 
-add_subdirectory(abseil-cpp)
+find_package(absl REQUIRED)
 
 add_executable(cuking cuking.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
