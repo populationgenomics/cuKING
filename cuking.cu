@@ -379,15 +379,22 @@ int main(int argc, char **argv) {
 
     const absl::Time time_after = absl::Now();
 
-    uint32_t num_related = 0;
+    std::vector<bool> related(num_samples);
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
         // Cut off at third degree
         // (https://www.kingrelatedness.com/manual.shtml).
-        constexpr float kKingCutoff = 0.0884f;
+        constexpr float kKingCutoff = 0.0442f;
         if (result[i * num_samples + j] >= kKingCutoff) {
-          ++num_related;
+          related[i] = related[j] = true;
         }
+      }
+    }
+
+    uint32_t num_related = 0;
+    for (size_t i = 0; i < num_samples; ++i) {
+      if (related[i]) {
+        ++num_related;
       }
     }
 
