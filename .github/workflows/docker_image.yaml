@@ -14,10 +14,10 @@ jobs:
       DOCKER_IMAGE: australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: gcloud setup
-        uses: google-github-actions/setup-gcloud@master
+        uses: google-github-actions/setup-gcloud@v0
         with:
           project_id: cpg-common
           service_account_key: ${{ secrets.GCP_DEPLOY_KEY }}
