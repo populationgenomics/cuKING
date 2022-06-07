@@ -356,14 +356,7 @@ int main(int argc, char **argv) {
         const absl::Time time_after = absl::Now();
         std::cout << "KING coefficient between " << i << " and " << j << ": "
                   << king_coeff << " (took " << (time_after - time_before)
-                  << ")";
-        // Cut off at third degree
-        // (https://www.kingrelatedness.com/manual.shtml).
-        constexpr float kKingCutoff = 0.0884f;
-        if (king_coeff < kKingCutoff) {
-          std::cout << " (unrelated)";
-        }
-        std::cout << std::endl;
+                  << ")" << std::endl;
       }
     }
   } else {
@@ -386,14 +379,19 @@ int main(int argc, char **argv) {
 
     const absl::Time time_after = absl::Now();
 
-    /*
+    uint32_t num_related = 0;
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
-        std::cout << result[i * num_samples + j] << std::endl;
+        // Cut off at third degree
+        // (https://www.kingrelatedness.com/manual.shtml).
+        constexpr float kKingCutoff = 0.0884f;
+        if (result[i * num_samples + j] >= kKingCutoff) {
+          ++num_related;
+        }
       }
     }
-    */
 
+    std::cout << num_related << " related samples found." << std::endl;
     std::cout << "CUDA kernel time: " << (time_after - time_before)
               << std::endl;
   }
