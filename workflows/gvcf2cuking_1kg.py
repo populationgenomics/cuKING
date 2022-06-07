@@ -18,7 +18,8 @@ def main():
     batch = hb.Batch(backend=service_backend)
 
     with open('1kg_gvcfs.txt') as f:
-        for gvcf_path in f.readlines():
+        for line in f.readlines():
+            gvcf_path = line.strip()
             basename = os.path.basename(gvcf_path)
             job = batch.new_job(basename)
             job.image(DOCKER_IMAGE)
