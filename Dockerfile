@@ -32,7 +32,6 @@ RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list && \
 
 RUN mkdir -p /deps/abseil-cpp && cd /deps/abseil-cpp && \
     curl -sSL https://github.com/abseil/abseil-cpp/archive/20211102.0.tar.gz | tar -xzf - --strip-components=1 && \
-    sed -i 's/^#define ABSL_OPTION_USE_\(.*\) 2/#define ABSL_OPTION_USE_\1 0/' "absl/base/options.h" && \
     cmake \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_STANDARD=17 \
