@@ -90,58 +90,37 @@ class ThreadPool {
   std::vector<std::thread> threads_;
 };
 
-// RAII-style CUDA-managed array.
+// Custom deleter for RAII-style CUDA-managed array.
 template <typename T>
-struct CudaArray {
-  explicit CudaArray(const size_t num_elements) : num_elements(num_elements) {
-    const auto err = cudaMallocManaged(&data, num_elements * sizeof(T));
-    if (err) {
-      std::cerr << "Error: can't allocate CUDA memory: "
-                << cudaGetErrorString(err) << std::endl;
-      exit(1);
-    }
-  }
-
-  CudaArray &operator=(const CudaArray &) = delete;
-  CudaArray(const CudaArray &) = delete;
-
-  CudaArray(CudaArray &&other) {
-    data = other.data;
-    num_elements = other.num_elements;
-    other.data = nullptr;
-    other.num_elements = 0;
-  }
-
-  CudaArray &operator=(CudaArray &&other) {
-    if (this != &other) {
-      data = other.data;
-      num_elements = other.num_elements;
-      other.data = nullptr;
-      other.num_elements = 0;
-    }
-    return *this;
-  }
-
-  ~CudaArray() {
-    cudaFree(data);
-    data = nullptr;
-    num_elements = 0;
-  }
-
-  T *data = nullptr;
-  size_t num_elements = 0;
+struct CudaArrayDeleter {
+  void operator()(T *const val) const { cudaFree(val); }
 };
 
+template <typename T>
+using CudaArray = std::unique_ptr<T[], CudaArrayDeleter<T>>;
+
+template <typename T>
+CudaArray<T> NewCudaArray(const size_t size) {
+  static_assert(std::is_pod<T>::value, "A must be a POD type.");
+  T *buffer = nullptr;
+  const auto err = cudaMallocManaged(&buffer, size * sizeof(T));
+  if (err) {
+    std::cerr << "Error: can't allocate CUDA memory: "
+              << cudaGetErrorString(err) << std::endl;
+    exit(1);
+  }
+  return CudaArray<T>(buffer, CudaArrayDeleter<T>());
+}
+
 struct Sample {
-  const uint16_t *entries = nullptr;  // Not owned.
-  uint32_t num_entries = 0;
-  uint32_t num_hets = 0;
+  const uint16_t *entries;  // Not owned.
+  uint32_t num_entries;
+  uint32_t num_hets;
 };
 
 struct ReadSamplesResult {
-  explicit ReadSamplesResult(size_t num_samples) : samples(num_samples) {}
   CudaArray<Sample> samples;
-  std::vector<std::unique_ptr<CudaArray<uint16_t>>> buffers;
+  std::vector<CudaArray<uint16_t>> buffers;
 };
 
 // Reads and decompresses sample data from `paths`, adding entries with
@@ -149,7 +128,7 @@ struct ReadSamplesResult {
 bool ReadSamples(const absl::Span<std::string> &paths,
                  ThreadPool *const thread_pool,
                  ReadSamplesResult *const result) {
-  result->samples = CudaArray<Sample>(paths.size());
+  result->samples = NewCudaArray<Sample>(paths.size());
   result->buffers.clear();
   result->buffers.resize(paths.size());
 
@@ -212,14 +191,15 @@ bool ReadSamples(const absl::Span<std::string> &paths,
       }
 
       // Decompress the contents.
-      result->buffers[i] = std::make_unique<CudaArray<uint16_t>>(
-          file_header.decompressed_size / sizeof(uint16_t));
-      auto &sample = result->samples.data[i];
-      sample.entries = result->buffers[i]->data;
-      sample.num_entries = result->buffers[i]->num_elements;
+      const size_t num_entries =
+          file_header.decompressed_size / sizeof(uint16_t);
+      result->buffers[i] = NewCudaArray<uint16_t>(num_entries);
+      auto &sample = result->samples[i];
+      sample.entries = result->buffers[i].get();
+      sample.num_entries = num_entries;
       sample.num_hets = file_header.num_hets;
       const size_t zstd_result = ZSTD_decompress(
-          result->buffers[i]->data, file_header.decompressed_size,
+          result->buffers[i].get(), file_header.decompressed_size,
           contents.data() + sizeof(cuking::FileHeader),
           contents.size() - sizeof(cuking::FileHeader));
       if (ZSTD_isError(zstd_result) ||
@@ -358,7 +338,7 @@ int main(int argc, char **argv) {
   const auto sample_paths_span =
       absl::MakeSpan(sample_paths).subspan(sample_range_begin, num_samples);
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
-  ReadSamplesResult read_samples_result(sample_paths_span.size());
+  ReadSamplesResult read_samples_result;
   if (!ReadSamples(sample_paths_span, &thread_pool, &read_samples_result)) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
@@ -372,7 +352,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
         const absl::Time time_before = absl::Now();
-        const float king_coeff = ComputeKing(samples.data[i], samples.data[j]);
+        const float king_coeff = ComputeKing(samples[i], samples[j]);
         const absl::Time time_after = absl::Now();
         std::cout << "KING coefficient between " << i << " and " << j << ": "
                   << king_coeff << " (took " << (time_after - time_before)
@@ -387,9 +367,10 @@ int main(int argc, char **argv) {
       }
     }
   } else {
-    CudaArray<float> result(num_samples * num_samples);
-    for (size_t i = 0; i < result.num_elements; ++i) {
-      result.data[i] = 0.f;
+    const size_t result_size = num_samples * num_samples;
+    auto result = NewCudaArray<float>(result_size);
+    for (size_t i = 0; i < result_size; ++i) {
+      result[i] = 0.f;
     }
 
     const absl::Time time_before = absl::Now();
@@ -398,7 +379,7 @@ int main(int argc, char **argv) {
     const int kNumCudaBlocks =
         (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
     ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
-        samples.data, num_samples, result.data);
+        samples.get(), num_samples, result.get());
 
     // Wait for GPU to finish before accessing on host.
     cudaDeviceSynchronize();
@@ -408,7 +389,7 @@ int main(int argc, char **argv) {
     /*
     for (size_t i = 0; i < num_samples - 1; ++i) {
       for (size_t j = i + 1; j < num_samples; ++j) {
-        std::cout << result.data[i * num_samples + j] << std::endl;
+        std::cout << result[i * num_samples + j] << std::endl;
       }
     }
     */
