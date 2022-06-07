@@ -19,6 +19,7 @@
 #include <string_view>
 
 #include "cuking.h"
+#include "url_reader.h"
 
 ABSL_FLAG(std::string, input, "",
           "The GVCF input filename, e.g. NA12878.g.vcf.gz");

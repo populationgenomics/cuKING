@@ -17,16 +17,21 @@ find_package(absl REQUIRED)
 add_executable(cuking cuking.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
 
-target_link_libraries(cuking
+add_library(url_reader
+    url_reader.cc
+)
+
+target_link_libraries(cuking PRIVATE
     absl::flags
     absl::flags_parse
     zstd
 )
 
-target_link_libraries(gvcf2cuking
+target_link_libraries(gvcf2cuking PRIVATE
     absl::flags
     absl::flags_parse
     absl::flat_hash_map
     hts
+    url_reader
     zstd
 )
