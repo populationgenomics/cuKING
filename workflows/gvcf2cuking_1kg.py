@@ -21,8 +21,8 @@ def main():
     with open('1kg_gvcfs.txt') as f:
         paths = [line.strip() for line in f.readlines()]
 
-    # Process 100 files per job.
-    for chunk in [paths[i : i + 100] for i in range(0, len(paths), 100)]:
+    # Process 20 files per job.
+    for chunk in [paths[i : i + 20] for i in range(0, len(paths), 20)]:
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
         job.memory('lowmem')
