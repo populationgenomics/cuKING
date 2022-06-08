@@ -204,8 +204,8 @@ bool ReadSamples(const absl::Span<std::string> &paths,
           contents.size() - sizeof(cuking::FileHeader));
       if (ZSTD_isError(zstd_result) ||
           zstd_result != file_header.decompressed_size) {
-        std::cerr << "Error: failed to decompress \"" << path << "\"."
-                  << std::endl;
+        std::cerr << "Error: failed to decompress \"" << path
+                  << "\": " << ZSTD_getErrorName(zstd_result) << std::endl;
         success = false;
         blocking_counter.DecrementCount();
         return;
@@ -219,13 +219,14 @@ bool ReadSamples(const absl::Span<std::string> &paths,
   return success;
 }
 
-__device__ __host__ inline uint32_t DecodeLocusDelta(const uint16_t value) {
-  return value >> 2;
+__device__ __host__ inline uint32_t DecodeLocusIndexDelta(
+    const uint16_t value) {
+  return value >> 1;
 }
 
 __device__ __host__ inline cuking::VariantCategory DecodeVariantCategory(
     const uint16_t value) {
-  return static_cast<cuking::VariantCategory>(value & 3);
+  return static_cast<cuking::VariantCategory>(value & 1);
 }
 
 __device__ __host__ float ComputeKing(const Sample &sample_i,
@@ -233,8 +234,8 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
   uint32_t num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t index_i = 0, index_j = 0,
-                pos_i = DecodeLocusDelta(sample_i.entries[0]),
-                pos_j = DecodeLocusDelta(sample_j.entries[0]);
+                pos_i = DecodeLocusIndexDelta(sample_i.entries[0]),
+                pos_j = DecodeLocusIndexDelta(sample_j.entries[0]);
        pos_i != static_cast<uint32_t>(-1) ||
        pos_j != static_cast<uint32_t>(-1);) {
     if (pos_i < pos_j) {
@@ -244,7 +245,7 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
       }
 
       if (++index_i < sample_i.num_entries) {
-        pos_i += DecodeLocusDelta(sample_i.entries[index_i]);
+        pos_i += DecodeLocusIndexDelta(sample_i.entries[index_i]);
       } else {
         pos_i = static_cast<uint32_t>(-1);
       }
@@ -257,7 +258,7 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
       }
 
       if (++index_j < sample_j.num_entries) {
-        pos_j += DecodeLocusDelta(sample_j.entries[index_j]);
+        pos_j += DecodeLocusIndexDelta(sample_j.entries[index_j]);
       } else {
         pos_j = static_cast<uint32_t>(-1);
       }
@@ -272,13 +273,13 @@ __device__ __host__ float ComputeKing(const Sample &sample_i,
       }
 
       if (++index_i < sample_i.num_entries) {
-        pos_i += DecodeLocusDelta(sample_i.entries[index_i]);
+        pos_i += DecodeLocusIndexDelta(sample_i.entries[index_i]);
       } else {
         pos_i = static_cast<uint32_t>(-1);
       }
 
       if (++index_j < sample_j.num_entries) {
-        pos_j += DecodeLocusDelta(sample_j.entries[index_j]);
+        pos_j += DecodeLocusIndexDelta(sample_j.entries[index_j]);
       } else {
         pos_j = static_cast<uint32_t>(-1);
       }

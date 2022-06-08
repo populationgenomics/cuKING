@@ -7,7 +7,6 @@ namespace cuking {
 enum class VariantCategory {
   kHet = 0,
   kHomAlt = 1,
-  kSkip = 2,
 };
 
 inline constexpr std::string_view kExpectedMagic = "CUK1";

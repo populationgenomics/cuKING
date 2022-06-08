@@ -28,20 +28,22 @@
 #include "gcs_client.h"
 
 ABSL_FLAG(std::string, input, "",
-          "The GVCF input filename, e.g. NA12878.g.vcf.gz");
-ABSL_FLAG(std::string, output, "",
-          "The cuking output filename, e.g. NA12878.cuking");
-ABSL_FLAG(float, downsample_fraction, 0.1f,
-          "The fraction of variants to retain.");
+          "The GVCF input filename, e.g. gs://some/bucket/NA12878.g.vcf.gz");
+ABSL_FLAG(
+    std::string, output, "",
+    "The cuking output filename, e.g. gs://another/bucket/NA12878.cuking");
+ABSL_FLAG(std::string, loci_table, "",
+          "The set of loci to retain; everything else will be filtered, e.g. "
+          "gs://some/bucket/loci_popmax_af_gt_0.05.bin");
 
 namespace {
 
-constexpr uint16_t kMaxLocusDelta = (1 << 14) - 1;
+constexpr uint16_t kMaxLocusIndexDelta = (1 << 15) - 1;
 
-inline uint16_t Encode(const int64_t locus_delta,
+inline uint16_t Encode(const uint64_t locus_index_delta,
                        const cuking::VariantCategory variant_category) {
-  assert(locus_delta <= kMaxLocusDelta);
-  return (locus_delta << 2) | static_cast<uint16_t>(variant_category);
+  assert(locus_index_delta <= kMaxLocusIndexDelta);
+  return (locus_index_delta << 1) | static_cast<uint16_t>(variant_category);
 }
 
 }  // namespace
@@ -60,6 +62,24 @@ int main(int argc, char** argv) {
     std::cerr << "Error: no output file specified." << std::endl;
     return 1;
   }
+
+  const auto& loci_table = absl::GetFlag(FLAGS_loci_table);
+  if (loci_table.empty()) {
+    std::cerr << "Error: no locus table." << std::endl;
+    return 1;
+  }
+
+  // Read the loci table.
+  auto client = gcs_client::NewGcsClient(1);
+  auto loci_str = client->Read(loci_table);
+  if (!loci_str.ok()) {
+    std::cerr << "Error: " << loci_str.status();
+    return 1;
+  }
+  const uint64_t* loci_array =
+      reinterpret_cast<const uint64_t*>(loci_str->data());
+  const size_t num_loci = loci_str->size() / sizeof(uint64_t);
+  std::cout << "Read " << num_loci << " loci." << std::endl;
 
   htsFile* const hts_file = bcf_open(input_file.c_str(), "r");
   if (hts_file == nullptr) {
@@ -104,11 +124,6 @@ int main(int argc, char** argv) {
       {"chr22", 2824183054}, {"chrX", 2875001522},  {"chrY", 3031042417},
   };
 
-  // To implement globally consistent filtering across samples, we select loci
-  // deterministically using a modulo operation.
-  const int64_t downsample_mod = static_cast<int64_t>(
-      std::round(1.f / absl::GetFlag(FLAGS_downsample_fraction)));
-
   bcf1_t* const record = bcf_init();
   if (record == nullptr) {
     std::cerr << "Error: failed to init record." << std::endl;
@@ -116,8 +131,8 @@ int main(int argc, char** argv) {
   }
   const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
-  int64_t last_position = -1, num_skips = 0, processed = 0;
-  uint32_t num_hets = 0;
+  uint64_t last_position = 0, locus_index = 0, last_locus_index = 0;
+  uint64_t processed = 0, num_hets = 0;
   int* genotypes = nullptr;
   const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
   std::vector<uint16_t> encoded;
@@ -132,16 +147,25 @@ int main(int argc, char** argv) {
       continue;  // Ignore this contig, e.g. alts.
     }
 
-    const int64_t global_position = offset->second + record->pos;
-    if (global_position <= last_position) {
+    const uint64_t global_position = offset->second + record->pos;
+    if (global_position < last_position) {
       std::cerr << "Error: variants not sorted by global position ("
                 << seq_names[record->rid] << ", " << record->pos << ")."
                 << std::endl;
       return 1;
     }
+    last_position = global_position;
 
-    if (global_position % downsample_mod != 0) {
-      continue;
+    // Walk the loci table to check if it contains the current position.
+    while (locus_index < num_loci &&
+           loci_array[locus_index] < global_position) {
+      ++locus_index;
+    }
+    if (locus_index >= num_loci) {
+      break;  // Reached the end of the table.
+    }
+    if (loci_array[locus_index] > global_position) {
+      continue;  // Locus not contained.
     }
 
     int num_genotypes = 0;
@@ -158,29 +182,27 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    int64_t locus_delta = global_position - last_position;
-    // If the delta doesn't fit, add skips.
-    while (locus_delta > kMaxLocusDelta) {
-      encoded.push_back(
-          Encode(kMaxLocusDelta - 1, cuking::VariantCategory::kSkip));
-      locus_delta -= kMaxLocusDelta - 1;
-      ++num_skips;
+    const uint64_t locus_index_delta = locus_index - last_locus_index;
+    if (locus_index_delta > kMaxLocusIndexDelta) {
+      std::cerr
+          << "Error: gap between variants to large, can't encode in 15 bits."
+          << std::endl;
     }
+    last_locus_index = locus_index;
 
     if (num_ref_alleles == 1) {
-      encoded.push_back(Encode(locus_delta, cuking::VariantCategory::kHet));
+      encoded.push_back(
+          Encode(locus_index_delta, cuking::VariantCategory::kHet));
       ++num_hets;
     } else if (num_ref_alleles == 0) {
-      encoded.push_back(Encode(locus_delta, cuking::VariantCategory::kHomAlt));
+      encoded.push_back(
+          Encode(locus_index_delta, cuking::VariantCategory::kHomAlt));
     }
-
-    last_position = global_position;
   }
 
   std::cout << "Stats:" << std::endl
             << "  entries: " << encoded.size() << std::endl
-            << "  hets: " << num_hets << std::endl
-            << "  skips: " << num_skips << std::endl;
+            << "  hets: " << num_hets << std::endl;
 
   // Prepare the output buffer.
   const size_t encoded_byte_size = encoded.size() * sizeof(uint16_t);
@@ -207,7 +229,6 @@ int main(int argc, char** argv) {
   file_header->num_hets = num_hets;
 
   // Write the output file.
-  auto client = gcs_client::NewGcsClient(1);
   if (auto status = client->Write(
           output_file, std::string(reinterpret_cast<char*>(output_data.data()),
                                    output_data.size()));
