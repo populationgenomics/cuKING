@@ -18,7 +18,8 @@ def main():
     ht = ht.filter(ht.popmax.AF > AF_THRESHOLD)
 
     # Convert to global position and collect list.
-    global_positions = ht.select(pos=ht.locus.global_position()).collect()
+    ht = ht.select(pos=ht.locus.global_position())
+    global_positions = ht.pos.collect()
     print(f'Filtered to {len(global_positions)} loci.')
 
     # Write to binary output file.
