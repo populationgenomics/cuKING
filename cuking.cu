@@ -209,16 +209,42 @@ __device__ float ComputeKing(const uint32_t num_entries,
              (4.f * min_hets);
 }
 
+// https://stackoverflow.com/a/63457507
+__device__ uint64_t ISqrt(const uint64_t n) {
+  uint8_t shift = 0 ? 1 : 64 - __clzll(n);
+  shift += shift & 1;  // round up to next multiple of 2
+
+  uint64_t result = 0;
+
+  do {
+    shift -= 2;
+    result <<= 1;  // make space for the next guessed bit
+    result |= 1;   // guess that the next bit is 1
+    result ^= result * result > (n >> shift);  // revert if guess too high
+  } while (shift != 0);
+
+  return result;
+}
+
 __global__ void ComputeKingKernel(const uint32_t num_samples,
                                   const uint32_t num_entries,
                                   const uint64_t *const bit_sets,
                                   float *const result) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  const int i = index / num_samples;
-  const int j = index % num_samples;
-  if (i >= num_samples || i >= j) {
+  const uint32_t num_pairs = num_samples * (num_samples - 1) / 2;
+  if (index >= num_pairs) {
     return;
   }
+
+  // Map from linear index to upper triangular matrix (i, j) coordinates:
+  // https://stackoverflow.com/questions/27086195/linear-index-upper-triangular-matrix
+  const uint32_t i =
+      num_samples - 2 -
+      static_cast<uint32_t>(
+          (ISqrt(-8 * index + 4 * num_samples * (num_samples - 1) - 7) - 1) /
+          2);
+  const uint32_t j = index + i + 1 - num_pairs +
+                     (num_samples - i) * ((num_samples - i) - 1) / 2;
   result[i * num_samples + j] = ComputeKing(
       num_entries, bit_sets + i * 2 * num_entries,
       bit_sets + (i * 2 + 1) * num_entries, bit_sets + j * 2 * num_entries,
@@ -275,7 +301,8 @@ int main(int argc, char **argv) {
 
   constexpr int kCudaBlockSize = 1024;
   const int kNumCudaBlocks =
-      (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
+      (num_samples * (num_samples - 1) / 2 + kCudaBlockSize - 1) /
+      kCudaBlockSize;
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
       num_samples, samples->num_entries, samples->bit_sets.get(), result.get());
 
