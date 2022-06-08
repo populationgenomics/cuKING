@@ -5,6 +5,7 @@ import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
 DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:d0d7f1bd871976b341e65cfd70c2e8cdf239260b'
+LOCI_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/loci_popmax_af_gt_0.05.bin'
 
 
 def main():
@@ -32,7 +33,9 @@ def main():
             )
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
-            job.command(f'gvcf2cuking --input={gvcf_path} --output={cuking_path}')
+            job.command(
+                f'gvcf2cuking --input={gvcf_path} --output={cuking_path} --loci_table={LOCI_TABLE_PATH}'
+            )
 
     batch.run(wait=False)
 
