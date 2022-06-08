@@ -37,7 +37,7 @@ ABSL_FLAG(std::string, loci_table, "",
 namespace {
 
 void SetBit(uint64_t* const bit_set, uint64_t index) {
-  bit_set[index >> 6] |= 1 << (index & 63);
+  bit_set[index >> 6] |= 1ull << (index & 63ull);
 }
 
 }  // namespace
@@ -107,15 +107,19 @@ int main(int argc, char** argv) {
   const absl::Cleanup seq_names_free = [seq_names] { free(seq_names); };
 
   // Used to convert to global position (for GRCh38).
-  const absl::flat_hash_map<std::string_view, int64_t> chr_offsets = {
-      {"chr1", 0},           {"chr2", 248956422},   {"chr3", 491149951},
-      {"chr4", 689445510},   {"chr5", 879660065},   {"chr6", 1061198324},
-      {"chr7", 1232004303},  {"chr8", 1391350276},  {"chr9", 1536488912},
-      {"chr10", 1674883629}, {"chr11", 1808681051}, {"chr12", 1943767673},
-      {"chr13", 2077042982}, {"chr14", 2191407310}, {"chr15", 2298451028},
-      {"chr16", 2400442217}, {"chr17", 2490780562}, {"chr18", 2574038003},
-      {"chr19", 2654411288}, {"chr20", 2713028904}, {"chr21", 2777473071},
-      {"chr22", 2824183054}, {"chrX", 2875001522},  {"chrY", 3031042417},
+  const absl::flat_hash_map<std::string_view, uint64_t> chr_offsets = {
+      {"chr1", 0ull},           {"chr2", 248956422ull},
+      {"chr3", 491149951ull},   {"chr4", 689445510ull},
+      {"chr5", 879660065ull},   {"chr6", 1061198324ull},
+      {"chr7", 1232004303ull},  {"chr8", 1391350276ull},
+      {"chr9", 1536488912ull},  {"chr10", 1674883629ull},
+      {"chr11", 1808681051ull}, {"chr12", 1943767673ull},
+      {"chr13", 2077042982ull}, {"chr14", 2191407310ull},
+      {"chr15", 2298451028ull}, {"chr16", 2400442217ull},
+      {"chr17", 2490780562ull}, {"chr18", 2574038003ull},
+      {"chr19", 2654411288ull}, {"chr20", 2713028904ull},
+      {"chr21", 2777473071ull}, {"chr22", 2824183054ull},
+      {"chrX", 2875001522ull},  {"chrY", 3031042417ull},
   };
 
   bcf1_t* const record = bcf_init();
@@ -126,10 +130,11 @@ int main(int argc, char** argv) {
   const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
   // Allocate space for two bit sets.
-  std::vector<uint64_t> bit_sets(2 * (num_loci + 64 - 1) / 64);
+  std::vector<uint64_t> bit_sets((num_loci + 64 - 1) / 64 * 2);
   uint64_t* const het_bit_set = bit_sets.data();
   uint64_t* const hom_alt_bit_set = bit_sets.data() + bit_sets.size() / 2;
-  uint64_t last_position = 0, locus_index = 0, processed = 0, num_hets = 0;
+  uint64_t last_position = 0, locus_index = 0;
+  uint32_t processed = 0, num_het = 0, num_hom_alt = 0;
   int* genotypes = nullptr;
   const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
   while (bcf_read(hts_file, hts_header, record) == 0) {
@@ -180,11 +185,16 @@ int main(int argc, char** argv) {
 
     if (num_ref_alleles == 1) {
       SetBit(het_bit_set, locus_index);
-      ++num_hets;
+      ++num_het;
     } else if (num_ref_alleles == 0) {
       SetBit(hom_alt_bit_set, locus_index);
+      ++num_hom_alt;
     }
   }
+
+  std::cout << "Stats:" << std::endl
+            << "  het: " << num_het << std::endl
+            << "  hom_alt: " << num_hom_alt << std::endl;
 
   // Write the output file.
   if (auto status = client->Write(

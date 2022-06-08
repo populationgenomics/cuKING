@@ -132,7 +132,7 @@ std::optional<ReadSamplesResult> ReadSamples(
                   << "\": " << error_code << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return std::optional<ReadSamplesResult>();
+        return;
       }
 
       std::ifstream in(path, std::ifstream::binary);
@@ -140,7 +140,7 @@ std::optional<ReadSamplesResult> ReadSamples(
         std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return std::optional<ReadSamplesResult>();
+        return;
       }
 
       // Make sure the buffer is set and expected sizes match.
@@ -152,12 +152,12 @@ std::optional<ReadSamplesResult> ReadSamples(
           result.bit_sets =
               NewCudaArray<uint64_t>(num_entries * 2 * paths.size());
         } else if (result.num_entries != num_entries) {
-          std::cerr << "Mismatch for number of entries encountered for \" << "
-                       "path << "\": "
-                    << num_entries " vs " << result.num_entries << "."
-                    << std::endl success = false;
+          std::cerr << "Mismatch for number of entries encountered for \""
+                    << path << "\": " << num_entries << " vs "
+                    << result.num_entries << "." << std::endl;
+          success = false;
           blocking_counter.DecrementCount();
-          return std::optional<ReadSamplesResult>();
+          return;
         }
       }
 
@@ -169,7 +169,7 @@ std::optional<ReadSamplesResult> ReadSamples(
         std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return std::optional<ReadSamplesResult>();
+        return;
       }
       in.close();
 
@@ -178,7 +178,7 @@ std::optional<ReadSamplesResult> ReadSamples(
   }
 
   blocking_counter.Wait();
-  return result;
+  return success ? std::move(result) : std::optional<ReadSamplesResult>();
 }
 
 __device__ float ComputeKing(const uint32_t num_entries,
@@ -199,7 +199,7 @@ __device__ float ComputeKing(const uint32_t num_entries,
     num_het_j += __popcll(het_j);
     num_both_het += __popcll(het_i & het_j);
     num_opposing_hom +=
-        __popcll((hom_ref_i ^ hom_alt_j) | (hom_ref_j ^ hom_alt_i));
+        __popcll((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i));
   }
 
   // Return the "between-family" estimator.
