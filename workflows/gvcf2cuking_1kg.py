@@ -18,15 +18,18 @@ def main():
     batch = hb.Batch(backend=service_backend)
 
     with open('1kg_gvcfs.txt') as f:
-        for line in f.readlines():
-            gvcf_path = line.strip()
+        paths = [line.strip() for line in f.readlines()]
+
+    # Process 100 files per job.
+    for chunk in [paths[i : i + 100] for i in range(0, len(paths), 100)]:
+        job = batch.new_job(chunk[0])
+        job.image(DOCKER_IMAGE)
+        job.memory('lowmem')
+        job.command(
+            'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
+        )
+        for gvcf_path in chunk:
             basename = os.path.basename(gvcf_path)
-            job = batch.new_job(basename)
-            job.image(DOCKER_IMAGE)
-            job.memory('lowmem')
-            job.command(
-                'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
-            )
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
             job.command(f'gvcf2cuking --input={gvcf_path} --output={cuking_path}')
 
