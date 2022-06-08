@@ -5,7 +5,6 @@
 #include <absl/synchronization/mutex.h>
 #include <absl/time/time.h>
 #include <absl/types/span.h>
-#include <zstd.h>
 
 #include <filesystem>
 #include <fstream>
@@ -16,10 +15,8 @@
 #include <thread>
 #include <vector>
 
-#include "cuking.h"
-
 ABSL_FLAG(std::string, sample_list, "",
-          "A text file listing one .cuking.zst input file path per line.");
+          "A text file listing one .cuking input file path per line.");
 ABSL_FLAG(
     size_t, sample_range_begin, 0,
     "The inclusive index of the first sample to consider in the sample list.");
@@ -28,8 +25,6 @@ ABSL_FLAG(
     "The exclusive index of the last sample to consider in the sample list.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
-ABSL_FLAG(bool, run_on_cpu, false,
-          "Whether to run computation on CPU, useful for validation.");
 
 namespace {
 // Adapted from the Abseil thread pool.
@@ -112,30 +107,22 @@ CudaArray<T> NewCudaArray(const size_t size) {
   return CudaArray<T>(buffer, CudaArrayDeleter<T>());
 }
 
-struct Sample {
-  const uint16_t *entries;  // Not owned.
-  uint32_t num_entries;
-  uint32_t num_hets;
-};
-
 struct ReadSamplesResult {
-  CudaArray<Sample> samples;
-  std::vector<CudaArray<uint16_t>> buffers;
+  uint32_t num_entries = 0;
+  CudaArray<uint64_t> bit_sets;
 };
 
 // Reads and decompresses sample data from `paths`, adding entries with
-// corresponding index into `result`.  Returns false if any failures occurred.
-bool ReadSamples(const absl::Span<std::string> &paths,
-                 ThreadPool *const thread_pool,
-                 ReadSamplesResult *const result) {
-  result->samples = NewCudaArray<Sample>(paths.size());
-  result->buffers.clear();
-  result->buffers.resize(paths.size());
-
+// corresponding index into `result`.
+std::optional<ReadSamplesResult> ReadSamples(
+    const absl::Span<std::string> &paths) {
+  ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
   absl::BlockingCounter blocking_counter(paths.size());
+  absl::Mutex mutex;
+  ReadSamplesResult result ABSL_GUARDED_BY(mutex);
   std::atomic<bool> success(true);
   for (size_t i = 0; i < paths.size(); ++i) {
-    thread_pool->Schedule([&, i] {
+    thread_pool.Schedule([&, i] {
       const auto &path = paths[i];
       // Determine the file size.
       std::error_code error_code;
@@ -145,7 +132,7 @@ bool ReadSamples(const absl::Span<std::string> &paths,
                   << "\": " << error_code << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return;
+        return std::optional<ReadSamplesResult>();
       }
 
       std::ifstream in(path, std::ifstream::binary);
@@ -153,157 +140,89 @@ bool ReadSamples(const absl::Span<std::string> &paths,
         std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return;
+        return std::optional<ReadSamplesResult>();
+      }
+
+      // Make sure the buffer is set and expected sizes match.
+      const size_t num_entries = file_size / sizeof(uint64_t) / 2;
+      {
+        const absl::MutexLock lock(&mutex);
+        if (result.num_entries == 0) {
+          result.num_entries = num_entries;
+          result.bit_sets =
+              NewCudaArray<uint64_t>(num_entries * 2 * paths.size());
+        } else if (result.num_entries != num_entries) {
+          std::cerr << "Mismatch for number of entries encountered for \" << "
+                       "path << "\": "
+                    << num_entries " vs " << result.num_entries << "."
+                    << std::endl success = false;
+          blocking_counter.DecrementCount();
+          return std::optional<ReadSamplesResult>();
+        }
       }
 
       // Read the entire file.
-      std::vector<uint8_t> contents(file_size);
-      in.read(reinterpret_cast<char *>(contents.data()), file_size);
+      in.read(
+          reinterpret_cast<char *>(result.bit_sets.get() + i * 2 * num_entries),
+          file_size);
       if (!in) {
         std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
         success = false;
         blocking_counter.DecrementCount();
-        return;
+        return std::optional<ReadSamplesResult>();
       }
       in.close();
-
-      // Validate the file header.
-      cuking::FileHeader file_header;
-      bool valid_header = true;
-      if (contents.size() < sizeof(cuking::FileHeader)) {
-        valid_header = false;
-      } else {
-        memcpy(&file_header, contents.data(), sizeof(cuking::FileHeader));
-        for (size_t i = 0; i < sizeof(file_header.magic); ++i) {
-          if (file_header.magic[i] != cuking::kExpectedMagic[i]) {
-            valid_header = false;
-            break;
-          }
-        }
-      }
-
-      if (!valid_header) {
-        std::cerr << "Error: failed to validate header for \"" << path << "\"."
-                  << std::endl;
-        success = false;
-        blocking_counter.DecrementCount();
-        return;
-      }
-
-      // Decompress the contents.
-      const size_t num_entries =
-          file_header.decompressed_size / sizeof(uint16_t);
-      result->buffers[i] = NewCudaArray<uint16_t>(num_entries);
-      auto &sample = result->samples[i];
-      sample.entries = result->buffers[i].get();
-      sample.num_entries = num_entries;
-      sample.num_hets = file_header.num_hets;
-      const size_t zstd_result = ZSTD_decompress(
-          result->buffers[i].get(), file_header.decompressed_size,
-          contents.data() + sizeof(cuking::FileHeader),
-          contents.size() - sizeof(cuking::FileHeader));
-      if (ZSTD_isError(zstd_result) ||
-          zstd_result != file_header.decompressed_size) {
-        std::cerr << "Error: failed to decompress \"" << path
-                  << "\": " << ZSTD_getErrorName(zstd_result) << std::endl;
-        success = false;
-        blocking_counter.DecrementCount();
-        return;
-      }
 
       blocking_counter.DecrementCount();
     });
   }
 
   blocking_counter.Wait();
-  return success;
+  return result;
 }
 
-__device__ __host__ inline uint32_t DecodeLocusIndexDelta(
-    const uint16_t value) {
-  return value >> 1;
-}
-
-__device__ __host__ inline cuking::VariantCategory DecodeVariantCategory(
-    const uint16_t value) {
-  return static_cast<cuking::VariantCategory>(value & 1);
-}
-
-__device__ __host__ float ComputeKing(const Sample &sample_i,
-                                      const Sample &sample_j) {
+__device__ float ComputeKing(const uint32_t num_entries,
+                             const uint64_t *const het_i_entries,
+                             const uint64_t *const hom_alt_i_entries,
+                             const uint64_t *const het_j_entries,
+                             const uint64_t *const hom_alt_j_entries) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
-  uint32_t num_both_het = 0, num_opposing_hom = 0;
-  for (uint32_t index_i = 0, index_j = 0,
-                pos_i = DecodeLocusIndexDelta(sample_i.entries[0]),
-                pos_j = DecodeLocusIndexDelta(sample_j.entries[0]);
-       pos_i != static_cast<uint32_t>(-1) ||
-       pos_j != static_cast<uint32_t>(-1);) {
-    if (pos_i < pos_j) {
-      if (DecodeVariantCategory(sample_i.entries[index_i]) ==
-          cuking::VariantCategory::kHomAlt) {
-        ++num_opposing_hom;
-      }
-
-      if (++index_i < sample_i.num_entries) {
-        pos_i += DecodeLocusIndexDelta(sample_i.entries[index_i]);
-      } else {
-        pos_i = static_cast<uint32_t>(-1);
-      }
-    }
-
-    if (pos_j < pos_i) {
-      if (DecodeVariantCategory(sample_j.entries[index_j]) ==
-          cuking::VariantCategory::kHomAlt) {
-        ++num_opposing_hom;
-      }
-
-      if (++index_j < sample_j.num_entries) {
-        pos_j += DecodeLocusIndexDelta(sample_j.entries[index_j]);
-      } else {
-        pos_j = static_cast<uint32_t>(-1);
-      }
-    }
-
-    if (pos_i == pos_j && pos_i != static_cast<uint32_t>(-1)) {
-      if (DecodeVariantCategory(sample_i.entries[index_i]) ==
-              cuking::VariantCategory::kHet &&
-          DecodeVariantCategory(sample_j.entries[index_j]) ==
-              cuking::VariantCategory::kHet) {
-        ++num_both_het;
-      }
-
-      if (++index_i < sample_i.num_entries) {
-        pos_i += DecodeLocusIndexDelta(sample_i.entries[index_i]);
-      } else {
-        pos_i = static_cast<uint32_t>(-1);
-      }
-
-      if (++index_j < sample_j.num_entries) {
-        pos_j += DecodeLocusIndexDelta(sample_j.entries[index_j]);
-      } else {
-        pos_j = static_cast<uint32_t>(-1);
-      }
-    }
+  uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
+  for (uint32_t k = 0; k < num_entries; ++k) {
+    const uint64_t het_i = het_i_entries[k];
+    const uint64_t hom_alt_i = hom_alt_i_entries[k];
+    const uint64_t het_j = het_j_entries[k];
+    const uint64_t hom_alt_j = hom_alt_j_entries[k];
+    const uint64_t hom_ref_i = (~hom_alt_i) & (~het_i);
+    const uint64_t hom_ref_j = (~hom_alt_j) & (~het_j);
+    num_het_i += __popcll(het_i);
+    num_het_j += __popcll(het_j);
+    num_both_het += __popcll(het_i & het_j);
+    num_opposing_hom +=
+        __popcll((hom_ref_i ^ hom_alt_j) | (hom_ref_j ^ hom_alt_i));
   }
 
   // Return the "between-family" estimator.
-  const uint32_t min_hets = sample_i.num_hets < sample_j.num_hets
-                                ? sample_i.num_hets
-                                : sample_j.num_hets;
-  return 0.5f + (2.f * num_both_het - 4.f * num_opposing_hom -
-                 sample_i.num_hets - sample_j.num_hets) /
-                    (4.f * min_hets);
+  const uint32_t min_hets = num_het_i < num_het_j ? num_het_i : num_het_j;
+  return 0.5f +
+         (2.f * num_both_het - 4.f * num_opposing_hom - num_het_i - num_het_j) /
+             (4.f * min_hets);
 }
 
-__global__ void ComputeKingKernel(const Sample *const samples,
-                                  const int num_samples, float *const result) {
+__global__ void ComputeKingKernel(const uint32_t num_samples,
+                                  const uint32_t num_entries,
+                                  const uint64_t *const bit_sets,
+                                  float *const result) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   const int i = index / num_samples;
   const int j = index % num_samples;
   if (i >= num_samples || i >= j) {
     return;
   }
-  result[i * num_samples + j] = ComputeKing(samples[i], samples[j]);
+  result[i * num_samples + j] = ComputeKing(
+      num_entries, bit_sets + i * 2 * num_entries,
+      bit_sets + (i * 2 + 1) * num_entries, bit_sets + j * 2 * num_entries,
+      bit_sets + (j * 2 + 1) * num_entries);
 }
 
 }  // namespace
@@ -338,71 +257,54 @@ int main(int argc, char **argv) {
   const size_t num_samples = sample_range_end - sample_range_begin;
   const auto sample_paths_span =
       absl::MakeSpan(sample_paths).subspan(sample_range_begin, num_samples);
-  ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
-  ReadSamplesResult read_samples_result;
-  if (!ReadSamples(sample_paths_span, &thread_pool, &read_samples_result)) {
+  const auto samples = ReadSamples(sample_paths_span);
+  if (!samples) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
   }
 
   std::cout << "Read " << num_samples << " samples." << std::endl;
 
-  const auto &samples = read_samples_result.samples;
-
-  if (absl::GetFlag(FLAGS_run_on_cpu)) {
-    for (size_t i = 0; i < num_samples - 1; ++i) {
-      for (size_t j = i + 1; j < num_samples; ++j) {
-        const absl::Time time_before = absl::Now();
-        const float king_coeff = ComputeKing(samples[i], samples[j]);
-        const absl::Time time_after = absl::Now();
-        std::cout << "KING coefficient between " << i << " and " << j << ": "
-                  << king_coeff << " (took " << (time_after - time_before)
-                  << ")" << std::endl;
-      }
-    }
-  } else {
-    const size_t result_size = num_samples * num_samples;
-    auto result = NewCudaArray<float>(result_size);
-    for (size_t i = 0; i < result_size; ++i) {
-      result[i] = 0.f;
-    }
-
-    const absl::Time time_before = absl::Now();
-
-    constexpr int kCudaBlockSize = 1024;
-    const int kNumCudaBlocks =
-        (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
-    ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
-        samples.get(), num_samples, result.get());
-
-    // Wait for GPU to finish before accessing on host.
-    cudaDeviceSynchronize();
-
-    const absl::Time time_after = absl::Now();
-
-    std::vector<bool> related(num_samples);
-    for (size_t i = 0; i < num_samples - 1; ++i) {
-      for (size_t j = i + 1; j < num_samples; ++j) {
-        // Cut off at third degree
-        // (https://www.kingrelatedness.com/manual.shtml).
-        constexpr float kKingCutoff = 0.0442f;
-        if (result[i * num_samples + j] >= kKingCutoff) {
-          related[i] = related[j] = true;
-        }
-      }
-    }
-
-    uint32_t num_related = 0;
-    for (size_t i = 0; i < num_samples; ++i) {
-      if (related[i]) {
-        ++num_related;
-      }
-    }
-
-    std::cout << num_related << " related samples found." << std::endl;
-    std::cout << "CUDA kernel time: " << (time_after - time_before)
-              << std::endl;
+  const size_t result_size = num_samples * num_samples;
+  auto result = NewCudaArray<float>(result_size);
+  for (size_t i = 0; i < result_size; ++i) {
+    result[i] = 0.f;
   }
+
+  const absl::Time time_before = absl::Now();
+
+  constexpr int kCudaBlockSize = 1024;
+  const int kNumCudaBlocks =
+      (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
+  ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
+      num_samples, samples->num_entries, samples->bit_sets.get(), result.get());
+
+  // Wait for GPU to finish before accessing on host.
+  cudaDeviceSynchronize();
+
+  const absl::Time time_after = absl::Now();
+
+  std::vector<bool> related(num_samples);
+  for (size_t i = 0; i < num_samples - 1; ++i) {
+    for (size_t j = i + 1; j < num_samples; ++j) {
+      // Cut off at third degree
+      // (https://www.kingrelatedness.com/manual.shtml).
+      constexpr float kKingCutoff = 0.0442f;
+      if (result[i * num_samples + j] >= kKingCutoff) {
+        related[i] = related[j] = true;
+      }
+    }
+  }
+
+  uint32_t num_related = 0;
+  for (size_t i = 0; i < num_samples; ++i) {
+    if (related[i]) {
+      ++num_related;
+    }
+  }
+
+  std::cout << num_related << " related samples found." << std::endl;
+  std::cout << "CUDA kernel time: " << (time_after - time_before) << std::endl;
 
   return 0;
 }

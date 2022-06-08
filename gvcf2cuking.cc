@@ -17,14 +17,12 @@
 #include <absl/flags/parse.h>
 #include <htslib/vcf.h>
 #include <htslib/vcfutils.h>
-#include <zstd.h>
 
 #include <cassert>
 #include <iostream>
 #include <string>
 #include <string_view>
 
-#include "cuking.h"
 #include "gcs_client.h"
 
 ABSL_FLAG(std::string, input, "",
@@ -38,12 +36,8 @@ ABSL_FLAG(std::string, loci_table, "",
 
 namespace {
 
-constexpr uint16_t kMaxLocusIndexDelta = (1 << 15) - 1;
-
-inline uint16_t Encode(const uint64_t locus_index_delta,
-                       const cuking::VariantCategory variant_category) {
-  assert(locus_index_delta <= kMaxLocusIndexDelta);
-  return (locus_index_delta << 1) | static_cast<uint16_t>(variant_category);
+void SetBit(uint64_t* const bit_set, uint64_t index) {
+  bit_set[index >> 6] |= 1 << (index & 63);
 }
 
 }  // namespace
@@ -131,15 +125,17 @@ int main(int argc, char** argv) {
   }
   const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
-  uint64_t last_position = 0, locus_index = 0, last_locus_index = 0;
-  uint64_t processed = 0, num_hets = 0;
+  // Allocate space for two bit sets.
+  std::vector<uint64_t> bit_sets(2 * (num_loci + 64 - 1) / 64);
+  uint64_t* const het_bit_set = bit_sets.data();
+  uint64_t* const hom_alt_bit_set = bit_sets.data() + bit_sets.size() / 2;
+  uint64_t last_position = 0, locus_index = 0, processed = 0, num_hets = 0;
   int* genotypes = nullptr;
   const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
-  std::vector<uint16_t> encoded;
   while (bcf_read(hts_file, hts_header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
-      std::cout << "Processed " << (processed >> 20) << " Mi records, encoded "
-                << encoded.size() << " entries..." << std::endl;
+      std::cout << "Processed " << (processed >> 20) << " Mi records..."
+                << std::endl;
     }
 
     const auto offset = chr_offsets.find(seq_names[record->rid]);
@@ -182,56 +178,18 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    const uint64_t locus_index_delta = locus_index - last_locus_index;
-    if (locus_index_delta > kMaxLocusIndexDelta) {
-      std::cerr
-          << "Error: gap between variants to large, can't encode in 15 bits."
-          << std::endl;
-    }
-    last_locus_index = locus_index;
-
     if (num_ref_alleles == 1) {
-      encoded.push_back(
-          Encode(locus_index_delta, cuking::VariantCategory::kHet));
+      SetBit(het_bit_set, locus_index);
       ++num_hets;
     } else if (num_ref_alleles == 0) {
-      encoded.push_back(
-          Encode(locus_index_delta, cuking::VariantCategory::kHomAlt));
+      SetBit(hom_alt_bit_set, locus_index);
     }
   }
-
-  std::cout << "Stats:" << std::endl
-            << "  entries: " << encoded.size() << std::endl
-            << "  hets: " << num_hets << std::endl;
-
-  // Prepare the output buffer.
-  const size_t encoded_byte_size = encoded.size() * sizeof(uint16_t);
-  const size_t compress_bound = ZSTD_compressBound(encoded_byte_size);
-  std::vector<uint8_t> output_data(sizeof(cuking::FileHeader) + compress_bound);
-
-  // zstd-compress the result.
-  constexpr int kZstdCompressionLevel = 3;
-  const size_t zstd_result = ZSTD_compress(
-      output_data.data() + sizeof(cuking::FileHeader), compress_bound,
-      encoded.data(), encoded_byte_size, kZstdCompressionLevel);
-  if (ZSTD_isError(zstd_result)) {
-    std::cerr << "Error: failed to zstd-compress the result." << std::endl;
-    return 1;
-  }
-  output_data.resize(sizeof(cuking::FileHeader) + zstd_result);
-
-  // Prepare the header.
-  cuking::FileHeader* const file_header =
-      reinterpret_cast<cuking::FileHeader*>(output_data.data());
-  memcpy(file_header->magic, cuking::kExpectedMagic.data(),
-         sizeof(file_header->magic));
-  file_header->decompressed_size = encoded_byte_size;
-  file_header->num_hets = num_hets;
 
   // Write the output file.
   if (auto status = client->Write(
-          output_file, std::string(reinterpret_cast<char*>(output_data.data()),
-                                   output_data.size()));
+          output_file, std::string(reinterpret_cast<char*>(bit_sets.data()),
+                                   bit_sets.size() * sizeof(uint64_t)));
       !status.ok()) {
     std::cerr << "Error: " << status << std::endl;
     return 1;
