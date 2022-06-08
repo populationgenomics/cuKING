@@ -25,10 +25,11 @@ def main():
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
         job.memory('lowmem')
-        job.command(
-            'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
-        )
         for gvcf_path in chunk:
+            # Need to refresh the token regularly.
+            job.command(
+                'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
+            )
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
             job.command(f'gvcf2cuking --input={gvcf_path} --output={cuking_path}')
