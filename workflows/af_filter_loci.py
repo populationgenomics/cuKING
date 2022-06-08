@@ -20,6 +20,9 @@ def main():
     # Convert to global position and collect list.
     ht = ht.select(pos=ht.locus.global_position())
     global_positions = ht.pos.collect()
+
+    # Deduplicate.
+    global_positions = sorted(set(global_positions))
     print(f'Filtered to {len(global_positions)} loci.')
 
     # Write to binary output file.
