@@ -7,6 +7,7 @@ from cpg_utils.hail_batch import init_batch, output_path
 
 GNOMAD_V3_TABLE = 'gs://gcp-public-data--gnomad/release/3.1.2/ht/genomes/gnomad.genomes.v3.1.2.sites.ht'
 AF_THRESHOLD = 0.05
+TARGET_COUNT = 1e5
 
 
 def main():
@@ -16,6 +17,7 @@ def main():
 
     # Filter rare variants.
     ht = ht.filter(ht.popmax.AF > AF_THRESHOLD)
+    ht = ht.sample(TARGET_COUNT / ht.count())
 
     # Convert to global position and collect list.
     ht = ht.select(pos=ht.locus.global_position())
