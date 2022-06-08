@@ -4,7 +4,7 @@ import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:d4877256d0b6e3a46465390e249106832e2c90af'
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:d0d7f1bd871976b341e65cfd70c2e8cdf239260b'
 
 
 def main():
