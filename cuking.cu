@@ -1,13 +1,13 @@
 #include <absl/base/thread_annotations.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
+#include <absl/strings/str_split.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <absl/synchronization/mutex.h>
 #include <absl/time/time.h>
-#include <absl/types/span.h>
 
-#include <filesystem>
-#include <fstream>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <queue>
@@ -15,21 +15,22 @@
 #include <thread>
 #include <vector>
 
-ABSL_FLAG(std::string, sample_list, "",
-          "A text file listing one .cuking input file path per line.");
-ABSL_FLAG(size_t, sample_range_begin, 0,
-          "The inclusive index of the first sample to consider in the sample "
-          "list. Defaults to the beginning of the list.");
-ABSL_FLAG(size_t, sample_range_end, static_cast<size_t>(-1),
-          "The exclusive index of the last sample to consider in the sample "
-          "list. Defaults to the full list.");
-ABSL_FLAG(int, num_reader_threads, 100,
-          "How many threads to use for parallel file reading.");
+#include "gcs_client.h"
+
+ABSL_FLAG(std::string, sample_map, "",
+          "A header-less CSV file listing sample IDs and cuking input "
+          "paths, e.g. gs://some/bucket/sample_map.csv");
+ABSL_FLAG(std::string, output, "",
+          "The sparse matrix result JSON output path, e.g. "
+          "gs://some/bucket/relatedness.json");
 ABSL_FLAG(
     uint32_t, max_results, 100 << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
+ABSL_FLAG(int, num_reader_threads, 100,
+          "How many threads to use for parallel file reading.");
 
 namespace {
+
 // Adapted from the Abseil thread pool.
 class ThreadPool {
  public:
@@ -117,7 +118,8 @@ struct ReadSamplesResult {
 
 // Reads and decompresses sample data from `paths`.
 std::optional<ReadSamplesResult> ReadSamples(
-    const absl::Span<std::string> &paths) {
+    const std::vector<std::string_view> &paths,
+    cuking::GcsClient *const gcs_client) {
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
   absl::BlockingCounter blocking_counter(paths.size());
   absl::Mutex mutex;
@@ -126,27 +128,18 @@ std::optional<ReadSamplesResult> ReadSamples(
   for (size_t i = 0; i < paths.size(); ++i) {
     thread_pool.Schedule([&, i] {
       const auto &path = paths[i];
-      // Determine the file size.
-      std::error_code error_code;
-      const size_t file_size = std::filesystem::file_size(path, error_code);
-      if (error_code) {
-        std::cerr << "Error: failed to determine size of \"" << path
-                  << "\": " << error_code << std::endl;
-        success = false;
-        blocking_counter.DecrementCount();
-        return;
-      }
 
-      std::ifstream in(path, std::ifstream::binary);
-      if (!in) {
-        std::cerr << "Error: failed to open \"" << path << "\"." << std::endl;
+      auto content = gcs_client->Read(path);
+      if (!content.ok()) {
+        std::cerr << "Error: failed to read \"" << path
+                  << "\": " << content.status() << std::endl;
         success = false;
         blocking_counter.DecrementCount();
         return;
       }
 
       // Make sure the buffer is set and expected sizes match.
-      const size_t num_entries = file_size / sizeof(uint64_t) / 2;
+      const size_t num_entries = content->size() / sizeof(uint64_t) / 2;
       {
         const absl::MutexLock lock(&mutex);
         if (result.num_entries == 0) {
@@ -163,17 +156,10 @@ std::optional<ReadSamplesResult> ReadSamples(
         }
       }
 
-      // Read the entire file.
-      in.read(
+      // Copy to the destination buffer.
+      memcpy(
           reinterpret_cast<char *>(result.bit_sets.get() + i * 2 * num_entries),
-          file_size);
-      if (!in) {
-        std::cerr << "Error: failed to read \"" << path << "\"." << std::endl;
-        success = false;
-        blocking_counter.DecrementCount();
-        return;
-      }
-      in.close();
+          content->data(), content->size());
 
       blocking_counter.DecrementCount();
     });
@@ -255,38 +241,37 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
 
-  const auto &sample_list_file = absl::GetFlag(FLAGS_sample_list);
-  if (sample_list_file.empty()) {
-    std::cerr << "Error: no sample list file specified." << std::endl;
+  const auto &sample_map_file = absl::GetFlag(FLAGS_sample_map);
+  if (sample_map_file.empty()) {
+    std::cerr << "Error: no sample map file specified." << std::endl;
     return 1;
   }
 
-  std::ifstream sample_list(sample_list_file);
-  if (!sample_list) {
-    std::cerr << "Error: failed to open sample list file." << std::endl;
+  auto gcs_client =
+      cuking::NewGcsClient(absl::GetFlag(FLAGS_num_reader_threads));
+  const auto sample_map_str = gcs_client->Read(sample_map_file);
+  if (!sample_map_str.ok()) {
+    std::cerr << "Error: failed to read sample map file: "
+              << sample_map_str.status() << std::endl;
     return 1;
   }
-  std::string line;
-  std::vector<std::string> sample_paths;
-  while (std::getline(sample_list, line)) {
+
+  absl::flat_hash_map<std::string_view, std::string_view> sample_map;
+  std::vector<std::string_view> sample_paths;
+  const std::vector<std::string_view> lines =
+      absl::StrSplit(*sample_map_str, '\n');
+  for (const auto &line : lines) {
     if (line.empty()) {
       continue;
     }
-    sample_paths.push_back(line);
+    const std::pair<std::string_view, std::string_view> key_val =
+        absl::StrSplit(line, ',');
+    sample_map[key_val.first] = key_val.second;
+    sample_paths.push_back(key_val.second);
   }
 
-  const size_t sample_range_begin = absl::GetFlag(FLAGS_sample_range_begin);
-  const size_t sample_range_end =
-      std::min(absl::GetFlag(FLAGS_sample_range_end), sample_paths.size());
-  if (sample_range_begin >= sample_range_end) {
-    std::cerr << "Error: invalid sample range specified." << std::endl;
-    return 1;
-  }
-
-  const size_t num_samples = sample_range_end - sample_range_begin;
-  const auto sample_paths_span =
-      absl::MakeSpan(sample_paths).subspan(sample_range_begin, num_samples);
-  const auto samples = ReadSamples(sample_paths_span);
+  const size_t num_samples = sample_paths.size();
+  const auto samples = ReadSamples(sample_paths, gcs_client.get());
   if (!samples) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
@@ -314,13 +299,18 @@ int main(int argc, char **argv) {
 
   const absl::Time time_after = absl::Now();
 
+  std::cout << "CUDA kernel time: " << (time_after - time_before) << std::endl;
+
   const uint32_t num_results = result_index[0];
   if (num_results > kMaxResults) {
-    std::cerr
-        << "Error: could not store all results: try increasing --max_results"
-        << std::endl;
+    std::cerr << "Error: could not store all results: try increasing the "
+                 "--max_results parameter."
+              << std::endl;
     return 1;
   }
+
+  std::cout << "Found " << num_results
+            << " coefficients above the cut-off threshold." << std::endl;
 
   std::vector<bool> related(num_samples);
   for (uint32_t i = 0; i < num_results; ++i) {
@@ -336,7 +326,13 @@ int main(int argc, char **argv) {
   }
 
   std::cout << num_related << " related samples found." << std::endl;
-  std::cout << "CUDA kernel time: " << (time_after - time_before) << std::endl;
+
+  // Sort the results and stream a JSON representation to GCS.
+  std::sort(results.get(), results.get() + num_results,
+            [](const KingResult &lhs, const KingResult &rhs) {
+              return std::tie(lhs.sample_i, lhs.sample_j, lhs.coeff) <
+                     std::tie(rhs.sample_i, rhs.sample_j, rhs.coeff);
+            });
 
   return 0;
 }

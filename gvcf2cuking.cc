@@ -26,10 +26,9 @@
 #include "gcs_client.h"
 
 ABSL_FLAG(std::string, input, "",
-          "The GVCF input filename, e.g. gs://some/bucket/NA12878.g.vcf.gz");
-ABSL_FLAG(
-    std::string, output, "",
-    "The cuking output filename, e.g. gs://another/bucket/NA12878.cuking");
+          "The GVCF input path, e.g. gs://some/bucket/NA12878.g.vcf.gz");
+ABSL_FLAG(std::string, output, "",
+          "The cuking output path, e.g. gs://another/bucket/NA12878.cuking");
 ABSL_FLAG(std::string, loci_table, "",
           "The set of loci to retain; everything else will be filtered, e.g. "
           "gs://some/bucket/loci_popmax_af_gt_0.05.bin");
@@ -64,10 +63,10 @@ int main(int argc, char** argv) {
   }
 
   // Read the loci table.
-  auto client = gcs_client::NewGcsClient(1);
-  auto loci_str = client->Read(loci_table);
+  auto gcs_client = cuking::NewGcsClient(1);
+  auto loci_str = gcs_client->Read(loci_table);
   if (!loci_str.ok()) {
-    std::cerr << "Error: " << loci_str.status();
+    std::cerr << "Error: " << loci_str.status() << std::endl;
     return 1;
   }
   const uint64_t* loci_array =
@@ -197,7 +196,7 @@ int main(int argc, char** argv) {
             << "  hom_alt: " << num_hom_alt << std::endl;
 
   // Write the output file.
-  if (auto status = client->Write(
+  if (auto status = gcs_client->Write(
           output_file, std::string(reinterpret_cast<char*>(bit_sets.data()),
                                    bit_sets.size() * sizeof(uint64_t)));
       !status.ok()) {

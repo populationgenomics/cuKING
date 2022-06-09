@@ -5,9 +5,7 @@
 
 #include <optional>
 
-namespace gcs_client {
-
-namespace gcs = google::cloud::storage;
+namespace cuking {
 
 namespace {
 
@@ -87,6 +85,7 @@ class GcsClientImpl : public GcsClient {
     if (!bucket_and_object.ok()) {
       return bucket_and_object.status();
     }
+
     // Make a copy of the GCS client for thread-safety.
     gcs::Client gcs_client = shared_gcs_client_;
 
@@ -103,6 +102,28 @@ class GcsClientImpl : public GcsClient {
     return absl::OkStatus();
   }
 
+  absl::StatusOr<gcs::ObjectWriteStream> WriteStream(
+      std::string_view url) const override {
+    auto bucket_and_object = SplitBlobPath(url);
+    if (!bucket_and_object.ok()) {
+      return bucket_and_object.status();
+    }
+
+    // Make a copy of the GCS client for thread-safety.
+    gcs::Client gcs_client = shared_gcs_client_;
+
+    auto stream =
+        gcs_client.WriteObject(std::string(bucket_and_object->first),
+                               std::string(bucket_and_object->second));
+
+    if (!stream) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Failed to open stream for blob ", url));
+    }
+
+    return std::move(stream);
+  }
+
  private:
   // Share connection pool, but need to make copies for thread-safety.
   gcs::Client shared_gcs_client_;
@@ -114,4 +135,4 @@ std::unique_ptr<GcsClient> NewGcsClient(const size_t max_connection_pool_size) {
   return std::make_unique<GcsClientImpl>(max_connection_pool_size);
 }
 
-}  // namespace gcs_client
+}  // namespace cuking
