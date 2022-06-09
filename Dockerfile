@@ -36,8 +36,11 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
     apt update && apt install -y google-cloud-sdk
 
-RUN mkdir -p /deps/abseil-cpp && cd /deps/abseil-cpp && \
-    curl -sSL https://github.com/abseil/abseil-cpp/archive/20211102.0.tar.gz | tar -xzf - --strip-components=1 && \
+# Don't use the Abseil 20211102 LTS release to work around
+# https://github.com/abseil/abseil-cpp/issues/1099.
+RUN mkdir -p /deps && cd /deps && \
+    git clone https://github.com/abseil/abseil-cpp.git && \
+    git checkout 7383f346c9e33a08ed2132f117b3de6b13eac173 && \
     cmake \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_STANDARD=17 \
