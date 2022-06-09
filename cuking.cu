@@ -17,12 +17,12 @@
 
 ABSL_FLAG(std::string, sample_list, "",
           "A text file listing one .cuking input file path per line.");
-ABSL_FLAG(
-    size_t, sample_range_begin, 0,
-    "The inclusive index of the first sample to consider in the sample list.");
-ABSL_FLAG(
-    size_t, sample_range_end, 0,
-    "The exclusive index of the last sample to consider in the sample list.");
+ABSL_FLAG(size_t, sample_range_begin, 0,
+          "The inclusive index of the first sample to consider in the sample "
+          "list. Defaults to the beginning of the list.");
+ABSL_FLAG(size_t, sample_range_end, static_cast<size_t>(-1),
+          "The exclusive index of the last sample to consider in the sample "
+          "list. Defaults to the full list.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
 ABSL_FLAG(
@@ -262,6 +262,10 @@ int main(int argc, char **argv) {
   }
 
   std::ifstream sample_list(sample_list_file);
+  if (!sample_list) {
+    std::cerr << "Error: failed to open sample list file." << std::endl;
+    return 1;
+  }
   std::string line;
   std::vector<std::string> sample_paths;
   while (std::getline(sample_list, line)) {
@@ -272,9 +276,9 @@ int main(int argc, char **argv) {
   }
 
   const size_t sample_range_begin = absl::GetFlag(FLAGS_sample_range_begin);
-  const size_t sample_range_end = absl::GetFlag(FLAGS_sample_range_end);
-  if (sample_range_begin >= sample_range_end ||
-      sample_range_end > sample_paths.size()) {
+  const size_t sample_range_end =
+      std::min(absl::GetFlag(FLAGS_sample_range_end), sample_paths.size());
+  if (sample_range_begin >= sample_range_end) {
     std::cerr << "Error: invalid sample range specified." << std::endl;
     return 1;
   }
