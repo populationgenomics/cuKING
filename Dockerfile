@@ -40,6 +40,7 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
 # https://github.com/abseil/abseil-cpp/issues/1099.
 RUN mkdir -p /deps && cd /deps && \
     git clone https://github.com/abseil/abseil-cpp.git && \
+    cd abseil-cpp && \
     git checkout 7383f346c9e33a08ed2132f117b3de6b13eac173 && \
     cmake \
       -DCMAKE_BUILD_TYPE=Release \
