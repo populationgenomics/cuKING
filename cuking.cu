@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <queue>
 #include <string>
 #include <thread>
@@ -256,7 +257,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  absl::flat_hash_map<std::string_view, std::string_view> sample_map;
+  std::vector<std::string_view> sample_ids;
   std::vector<std::string_view> sample_paths;
   const std::vector<std::string_view> lines =
       absl::StrSplit(*sample_map_str, '\n');
@@ -264,14 +265,14 @@ int main(int argc, char **argv) {
     if (line.empty()) {
       continue;
     }
-    const std::pair<std::string_view, std::string_view> key_val =
+    const std::pair<std::string_view, std::string_view> sample_id_and_path =
         absl::StrSplit(line, ',');
-    sample_map[key_val.first] = key_val.second;
-    sample_paths.push_back(key_val.second);
+    sample_ids.push_back(sample_id_and_path.first);
+    sample_paths.push_back(sample_id_and_path.second);
   }
 
   const size_t num_samples = sample_paths.size();
-  const auto samples = ReadSamples(sample_paths, gcs_client.get());
+  auto samples = ReadSamples(sample_paths, gcs_client.get());
   if (!samples) {
     std::cerr << "Error: failed to read samples." << std::endl;
     return 1;
@@ -298,8 +299,10 @@ int main(int argc, char **argv) {
   cudaDeviceSynchronize();
 
   const absl::Time time_after = absl::Now();
-
   std::cout << "CUDA kernel time: " << (time_after - time_before) << std::endl;
+
+  // Free some memory for postprocessing.
+  samples->bit_sets.reset();
 
   const uint32_t num_results = result_index[0];
   if (num_results > kMaxResults) {
@@ -327,12 +330,22 @@ int main(int argc, char **argv) {
 
   std::cout << num_related << " related samples found." << std::endl;
 
-  // Sort the results and stream a JSON representation to GCS.
-  std::sort(results.get(), results.get() + num_results,
-            [](const KingResult &lhs, const KingResult &rhs) {
-              return std::tie(lhs.sample_i, lhs.sample_j, lhs.coeff) <
-                     std::tie(rhs.sample_i, rhs.sample_j, rhs.coeff);
-            });
+  // Create a map for JSON serialization.
+  absl::flat_hash_map<std::string_view,
+                      absl::flat_hash_map<std::string_view, float>>
+      result_map;
+  for (size_t i = 0; i < num_results; ++i) {
+    const auto &result = results[i];
+    result_map[sample_ids[result.sample_i]][sample_ids[result.sample_j]] =
+        result.coeff;
+  }
+
+  if (const auto status = gcs_client->Write(absl::GetFlag(FLAGS_output),
+                                            nlohmann::json(result_map).dump(4));
+      !status.ok()) {
+    std::cerr << "Failed to write output: " << status << std::endl;
+    return 1;
+  }
 
   return 0;
 }
