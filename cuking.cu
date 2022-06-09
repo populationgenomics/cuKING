@@ -25,6 +25,9 @@ ABSL_FLAG(
     "The exclusive index of the last sample to consider in the sample list.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
+ABSL_FLAG(
+    uint32_t, max_results, 100 << 20,
+    "How many coefficients for related sample pairs to reserve memory for.");
 
 namespace {
 // Adapted from the Abseil thread pool.
@@ -112,8 +115,7 @@ struct ReadSamplesResult {
   CudaArray<uint64_t> bit_sets;
 };
 
-// Reads and decompresses sample data from `paths`, adding entries with
-// corresponding index into `result`.
+// Reads and decompresses sample data from `paths`.
 std::optional<ReadSamplesResult> ReadSamples(
     const absl::Span<std::string> &paths) {
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
@@ -209,20 +211,43 @@ __device__ float ComputeKing(const uint32_t num_entries,
              (4.f * min_hets);
 }
 
+// Stores the KING coefficient for one pair of samples.
+struct KingResult {
+  uint32_t sample_i, sample_j;
+  float coeff;
+};
+
 __global__ void ComputeKingKernel(const uint32_t num_samples,
                                   const uint32_t num_entries,
                                   const uint64_t *const bit_sets,
-                                  float *const result) {
+                                  const uint32_t max_results,
+                                  KingResult *const results,
+                                  uint32_t *const result_index) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   const int i = index / num_samples;
   const int j = index % num_samples;
   if (i >= num_samples || i >= j) {
     return;
   }
-  result[i * num_samples + j] = ComputeKing(
-      num_entries, bit_sets + i * 2 * num_entries,
-      bit_sets + (i * 2 + 1) * num_entries, bit_sets + j * 2 * num_entries,
-      bit_sets + (j * 2 + 1) * num_entries);
+
+  const float coeff = ComputeKing(num_entries, bit_sets + i * 2 * num_entries,
+                                  bit_sets + (i * 2 + 1) * num_entries,
+                                  bit_sets + j * 2 * num_entries,
+                                  bit_sets + (j * 2 + 1) * num_entries);
+
+  // Only store results at 3rd degree or closer.
+  // (https://www.kingrelatedness.com/manual.shtml).
+  constexpr float kKingCutoff = 0.0442f;
+  if (coeff > kKingCutoff) {
+    // Reserve a result slot atomically to avoid collisions.
+    const uint32_t reserved = atomicAdd(result_index, 1u);
+    if (reserved < max_results) {
+      KingResult &result = results[reserved];
+      result.sample_i = i;
+      result.sample_j = j;
+      result.coeff = coeff;
+    }
+  }
 }
 
 }  // namespace
@@ -265,11 +290,11 @@ int main(int argc, char **argv) {
 
   std::cout << "Read " << num_samples << " samples." << std::endl;
 
-  const size_t result_size = num_samples * num_samples;
-  auto result = NewCudaArray<float>(result_size);
-  for (size_t i = 0; i < result_size; ++i) {
-    result[i] = 0.f;
-  }
+  const uint32_t kMaxResults = absl::GetFlag(FLAGS_max_results);
+  auto results = NewCudaArray<KingResult>(kMaxResults);
+  memset(results.get(), 0, sizeof(KingResult) * kMaxResults);
+  auto result_index = NewCudaArray<uint32_t>(1);
+  result_index[0] = 0;
 
   const absl::Time time_before = absl::Now();
 
@@ -277,23 +302,26 @@ int main(int argc, char **argv) {
   const int kNumCudaBlocks =
       (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
-      num_samples, samples->num_entries, samples->bit_sets.get(), result.get());
+      num_samples, samples->num_entries, samples->bit_sets.get(), kMaxResults,
+      results.get(), result_index.get());
 
   // Wait for GPU to finish before accessing on host.
   cudaDeviceSynchronize();
 
   const absl::Time time_after = absl::Now();
 
+  const uint32_t num_results = result_index[0];
+  if (num_results > kMaxResults) {
+    std::cerr
+        << "Error: could not store all results: try increasing --max_results"
+        << std::endl;
+    return 1;
+  }
+
   std::vector<bool> related(num_samples);
-  for (size_t i = 0; i < num_samples - 1; ++i) {
-    for (size_t j = i + 1; j < num_samples; ++j) {
-      // Cut off at third degree
-      // (https://www.kingrelatedness.com/manual.shtml).
-      constexpr float kKingCutoff = 0.0442f;
-      if (result[i * num_samples + j] >= kKingCutoff) {
-        related[i] = related[j] = true;
-      }
-    }
+  for (uint32_t i = 0; i < num_results; ++i) {
+    const auto &result = results[i];
+    related[result.sample_i] = related[result.sample_j] = true;
   }
 
   uint32_t num_related = 0;
