@@ -2,7 +2,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
-#include <absl/strings/str_split.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <absl/synchronization/mutex.h>
 #include <absl/time/time.h>
@@ -19,8 +18,8 @@
 #include "gcs_client.h"
 
 ABSL_FLAG(std::string, sample_map, "",
-          "A header-less CSV file listing sample IDs and cuking input "
-          "paths, e.g. gs://some/bucket/sample_map.csv");
+          "A JSON file mapping sample IDs to cuking input paths, e.g. "
+          "gs://some/bucket/sample_map.json");
 ABSL_FLAG(std::string, output, "",
           "The sparse matrix result JSON output path, e.g. "
           "gs://some/bucket/relatedness.json");
@@ -29,6 +28,10 @@ ABSL_FLAG(
     "How many coefficients for related sample pairs to reserve memory for.");
 ABSL_FLAG(int, num_reader_threads, 100,
           "How many threads to use for parallel file reading.");
+ABSL_FLAG(
+    float, king_coeff_threshold, 0.0442f,
+    "Only store coefficients larger than this threshold. Defaults to 3rd "
+    "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
 
 namespace {
 
@@ -119,7 +122,7 @@ struct ReadSamplesResult {
 
 // Reads and decompresses sample data from `paths`.
 std::optional<ReadSamplesResult> ReadSamples(
-    const std::vector<std::string_view> &paths,
+    const std::vector<std::string> &paths,
     cuking::GcsClient *const gcs_client) {
   ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
   absl::BlockingCounter blocking_counter(paths.size());
@@ -207,6 +210,7 @@ struct KingResult {
 __global__ void ComputeKingKernel(const uint32_t num_samples,
                                   const uint32_t num_entries,
                                   const uint64_t *const bit_sets,
+                                  const float coeff_threshold,
                                   const uint32_t max_results,
                                   KingResult *const results,
                                   uint32_t *const result_index) {
@@ -222,10 +226,7 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
                                   bit_sets + j * 2 * num_entries,
                                   bit_sets + (j * 2 + 1) * num_entries);
 
-  // Only store results at 3rd degree or closer.
-  // (https://www.kingrelatedness.com/manual.shtml).
-  constexpr float kKingCutoff = 0.0442f;
-  if (coeff > kKingCutoff) {
+  if (coeff > coeff_threshold) {
     // Reserve a result slot atomically to avoid collisions.
     const uint32_t reserved = atomicAdd(result_index, 1u);
     if (reserved < max_results) {
@@ -250,26 +251,22 @@ int main(int argc, char **argv) {
 
   auto gcs_client =
       cuking::NewGcsClient(absl::GetFlag(FLAGS_num_reader_threads));
-  const auto sample_map_str = gcs_client->Read(sample_map_file);
+  auto sample_map_str = gcs_client->Read(sample_map_file);
   if (!sample_map_str.ok()) {
     std::cerr << "Error: failed to read sample map file: "
               << sample_map_str.status() << std::endl;
     return 1;
   }
 
-  std::vector<std::string_view> sample_ids;
-  std::vector<std::string_view> sample_paths;
-  const std::vector<std::string_view> lines =
-      absl::StrSplit(*sample_map_str, '\n');
-  for (const auto &line : lines) {
-    if (line.empty()) {
-      continue;
-    }
-    const std::pair<std::string_view, std::string_view> sample_id_and_path =
-        absl::StrSplit(line, ',');
-    sample_ids.push_back(sample_id_and_path.first);
-    sample_paths.push_back(sample_id_and_path.second);
+  auto sample_map = nlohmann::json::parse(*sample_map_str);
+  sample_map_str->clear();
+  std::vector<std::string> sample_ids;
+  std::vector<std::string> sample_paths;
+  for (const auto &[id, path] : sample_map.items()) {
+    sample_ids.push_back(id);
+    sample_paths.push_back(path);
   }
+  sample_map.clear();
 
   const size_t num_samples = sample_paths.size();
   auto samples = ReadSamples(sample_paths, gcs_client.get());
@@ -292,8 +289,9 @@ int main(int argc, char **argv) {
   const int kNumCudaBlocks =
       (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
-      num_samples, samples->num_entries, samples->bit_sets.get(), kMaxResults,
-      results.get(), result_index.get());
+      num_samples, samples->num_entries, samples->bit_sets.get(),
+      absl::GetFlag(FLAGS_king_coeff_threshold), kMaxResults, results.get(),
+      result_index.get());
 
   // Wait for GPU to finish before accessing on host.
   cudaDeviceSynchronize();
