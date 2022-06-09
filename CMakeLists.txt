@@ -31,7 +31,7 @@ target_link_libraries(gcs_client PRIVATE
 target_link_libraries(cuking PRIVATE
     absl::flags
     absl::flags_parse
-    zstd
+    gcs_client
 )
 
 target_link_libraries(gvcf2cuking PRIVATE
@@ -40,5 +40,4 @@ target_link_libraries(gvcf2cuking PRIVATE
     absl::flat_hash_map
     hts
     gcs_client
-    zstd
 )
