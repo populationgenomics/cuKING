@@ -14,7 +14,7 @@ import json
 )
 @click.option(
     '--king_threshold',
-    default=0.177,  # 2nd degree
+    default=0.0884,  # 2nd degree
     help='The coefficient value cut-off to use to only filter closely related samples.',
 )
 @click.option(
