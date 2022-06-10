@@ -11,11 +11,11 @@ TARGET_COUNT = 250000
 def main():
     init_batch()
 
-    ht = hl.read_matrix_table(DENSE_HGDP_1KG_TABLE)
-    ht = ht.filter_rows(ht.gnomad_freq.AF < AF_THRESHOLD)
-    ht = ht.sample(TARGET_COUNT / ht.count())
-    ht = ht.filter_cols(ht.hgdp_tgp_meta.project == '1000 Genomes')
-    kinship = hl.king(ht.GT)
+    mt = hl.read_matrix_table(DENSE_HGDP_1KG_TABLE)
+    mt = mt.filter_rows(mt.gnomad_freq.AF < AF_THRESHOLD)
+    mt = mt.sample(TARGET_COUNT / mt.count())
+    mt = mt.filter_cols(mt.hgdp_tgp_meta.project == '1000 Genomes')
+    kinship = hl.king(mt.GT)
     kinship.write(output_path('king_1kg.mt'))
 
 
