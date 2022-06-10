@@ -11,7 +11,7 @@ TARGET_COUNT = 250000
 def main():
     init_batch()
 
-    ht = hl.read_table(DENSE_HGDP_1KG_TABLE)
+    ht = hl.read_matrix_table(DENSE_HGDP_1KG_TABLE)
     ht = ht.filter_cols(ht.hgdp_tgp_meta.project == '1000 Genomes')
     ht = ht.filter(ht.gnomad_freq.AF < AF_THRESHOLD)
     ht = ht.sample(TARGET_COUNT / ht.count())
