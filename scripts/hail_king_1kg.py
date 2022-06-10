@@ -13,8 +13,10 @@ def main():
 
     mt = hl.read_matrix_table(DENSE_HGDP_1KG_TABLE)
     mt = mt.filter_rows(mt.gnomad_popmax.AF < AF_THRESHOLD)
-    mt = mt.sample_rows(TARGET_COUNT / mt.count())
+    mt = mt.sample_rows(TARGET_COUNT / mt.count(), seed=27182)
     mt = mt.filter_cols(mt.hgdp_tgp_meta.project == '1000 Genomes')
+    mt = mt.repartition(100, shuffle=False)
+    mt.write(output_path('filtered_1kg.mt'))
     kinship = hl.king(mt.GT)
     kinship.write(output_path('king_1kg.mt'))
 
