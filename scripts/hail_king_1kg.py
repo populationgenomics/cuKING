@@ -12,7 +12,7 @@ def main():
     init_batch()
 
     mt = hl.read_matrix_table(DENSE_HGDP_1KG_TABLE)
-    mt = mt.filter_rows(mt.gnomad_freq.AF < AF_THRESHOLD)
+    mt = mt.filter_rows(mt.gnomad_popmax.AF < AF_THRESHOLD)
     mt = mt.sample(TARGET_COUNT / mt.count())
     mt = mt.filter_cols(mt.hgdp_tgp_meta.project == '1000 Genomes')
     kinship = hl.king(mt.GT)
