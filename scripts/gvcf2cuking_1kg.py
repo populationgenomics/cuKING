@@ -4,7 +4,7 @@ import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:d0d7f1bd871976b341e65cfd70c2e8cdf239260b'
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:1eaea078804541c43b7adb1db7fd5124fc3380cf'
 LOCI_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/loci_random_250k.bin'
 
 
