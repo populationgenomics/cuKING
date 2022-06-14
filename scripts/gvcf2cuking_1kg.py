@@ -26,6 +26,7 @@ def main():
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
         job.memory('lowmem')
+        job.command('set -x')
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
             job.command(
