@@ -175,17 +175,13 @@ int main(int argc, char** argv) {
       continue;  // GT not present or unexpected number of GT entries.
     }
 
-    const int num_ref_alleles =
-        (bcf_gt_allele(genotypes[0]) == 0) + (bcf_gt_allele(genotypes[1]) == 0);
+    const int gt0 = bcf_gt_allele(genotypes[0]);
+    const int gt1 = bcf_gt_allele(genotypes[1]);
 
-    if (num_ref_alleles == 2) {  // HomRef
-      continue;
-    }
-
-    if (num_ref_alleles == 1) {
+    if (gt0 != gt1) {
       SetBit(het_bit_set, locus_index);
       ++num_het;
-    } else if (num_ref_alleles == 0) {
+    } else if (gt0 != 0) {
       SetBit(hom_alt_bit_set, locus_index);
       ++num_hom_alt;
     }
