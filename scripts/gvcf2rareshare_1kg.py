@@ -4,7 +4,8 @@ import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:aa38a71e6ca52faa6a053f91f5a6be9b3c5d6514'
+# TODO: update SHA after fixing table.
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:e2e5c746cc5791769ffec482150c2e468ee6a5eb'
 AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af.bin'
 
 
