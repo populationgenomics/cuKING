@@ -55,7 +55,7 @@ class GcsClientImpl : public GcsClient {
       std::optional<int> content_length;
       for (const auto& header : reader.headers()) {
         if (header.first == "content-length") {
-          int value = 0;
+          size_t value = 0;
           if (!absl::SimpleAtoi(header.second, &value)) {
             return absl::NotFoundError(
                 "Couldn't parse content-length header value");

@@ -240,7 +240,13 @@ int main(int argc, char** argv) {
   deltas.reserve(global_positions.size());
   uint64_t last_position = 0;
   for (const uint64_t position : global_positions) {
-    deltas.push_back(position - last_position);
+    const uint64_t delta = position - last_position;
+    if (delta >= 1ULL << 32) {
+      std::cerr << "Error: can't encode delta at " << position
+                << " using 32 bits." << std::endl;
+      return 1;
+    }
+    deltas.push_back(delta);
     last_position = position;
   }
 
