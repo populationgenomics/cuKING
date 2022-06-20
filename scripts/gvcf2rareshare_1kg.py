@@ -35,7 +35,7 @@ def main():
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
             job.command(
-                f'gvcf2cuking --input={gvcf_path} --output={cuking_path} --af_table={AF_TABLE_PATH}'
+                f'gvcf2rareshare --input={gvcf_path} --output={cuking_path} --af_table={AF_TABLE_PATH}'
             )
 
     batch.run(wait=False)
