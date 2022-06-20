@@ -33,9 +33,9 @@ def main():
                 'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
             )
             basename = os.path.basename(gvcf_path)
-            cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
+            rareshare_path = output_path(basename.replace('.g.vcf.gz', '.rareshare'))
             job.command(
-                f'gvcf2rareshare --input={gvcf_path} --output={cuking_path} --af_table={AF_TABLE_PATH}'
+                f'gvcf2rareshare --input={gvcf_path} --output={rareshare_path} --af_table={AF_TABLE_PATH}'
             )
 
     batch.run(wait=False)
