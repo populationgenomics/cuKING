@@ -16,7 +16,7 @@ def main():
         remote_tmpdir=remote_tmpdir(),
     )
 
-    batch = hb.Batch(backend=service_backend)
+    batch = hb.Batch('gvcf2rareshare', backend=service_backend)
 
     with open('1kg_gvcfs.txt') as f:
         paths = [line.strip() for line in f.readlines()]
