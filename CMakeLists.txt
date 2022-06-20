@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(ABSL_PROPAGATE_CXX_STD ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 80)  # A100
+set(CMAKE_CUDA_ARCHITECTURES 80) # A100
 
 add_compile_options(-Wall)
 
@@ -18,6 +18,7 @@ find_package(nlohmann_json REQUIRED)
 
 add_executable(cuking cuking.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
+add_executable(gvcf2rareshare gvcf2rareshare.cc)
 
 add_library(gcs_client
     gcs_client.cc
@@ -37,6 +38,14 @@ target_link_libraries(cuking PRIVATE
 )
 
 target_link_libraries(gvcf2cuking PRIVATE
+    absl::flags
+    absl::flags_parse
+    absl::flat_hash_map
+    hts
+    gcs_client
+)
+
+target_link_libraries(gvcf2rareshare PRIVATE
     absl::flags
     absl::flags_parse
     absl::flat_hash_map

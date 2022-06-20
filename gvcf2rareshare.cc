@@ -1,16 +1,3 @@
-// Converts a single-sample GVCF to a compact binary format used by cuKING.
-//
-// Note: assumes alignment with GRCh38 to convert to global positions.
-//
-// To use GCS input paths, set the GCS_OAUTH_TOKEN beforehand
-// (see https://github.com/samtools/htslib/pull/446):
-// export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
-// export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-//
-// Example:
-//   ./gvcf2cuking --input=gs://some/bucket/NA12878.g.vcf.gz
-//                 --output=gs://another/bucket/NA12878.cuking
-
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
@@ -18,8 +5,10 @@
 #include <htslib/vcf.h>
 #include <htslib/vcfutils.h>
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <priority_queue>
 #include <string>
 #include <string_view>
 
@@ -29,14 +18,42 @@ ABSL_FLAG(std::string, input, "",
           "The GVCF input path, e.g. gs://some/bucket/NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
           "The cuking output path, e.g. gs://another/bucket/NA12878.cuking");
-ABSL_FLAG(std::string, loci_table, "",
-          "The set of loci to retain; everything else will be filtered, e.g. "
-          "gs://some/bucket/loci_popmax_af_gt_0.05.bin");
+ABSL_FLAG(std::string, af_table, "",
+          "The allele frequency table to use, e.g. "
+          "gs://some/bucket/gnomad_v3_popmax_af.bin");
+ABSL_FLAG(size_t, num_output_variants, "",
+          "How many rare variants to collect.");
 
 namespace {
 
-void SetBit(uint64_t* const bit_set, uint64_t index) {
-  bit_set[index >> 6] |= 1ull << (index & 63ull);
+#pragma pack(push, 1)
+struct AfTableEntry {
+  uint64_t global_position;
+  char allele;
+  float allele_frequency;
+};
+#pragma pack(pop)
+
+std::optional<float> FindMinAf(const uint64_t global_position,
+                               const char allele0, const char allele1,
+                               const AfTableEntry* const af_table,
+                               const size_t af_table_size) {
+  const AfTableEntry search_entry;
+  search_entry.global_position = global_position;
+  const auto iter_pair =
+      std::equal_range(af_table, af_table + af_table_size, position,
+                       [](const AfTableEntry& lhs, const AfTableEntry& rhs) {
+                         return lhs.global_position < rhs.global_positionl
+                       });
+  bool found = false;
+  float min_af = 1.f;
+  for (auto iter = iter_pair.first(); iter != iter_pair.second(); ++iter) {
+    if (iter->allele == allele0 || iter->allele == allele1) {
+      min_af = std::min(min_af, iter->allele_frequency);
+      found = true;
+    }
+  }
+  return found ? min_af : std::optional<float>();
 }
 
 }  // namespace
@@ -56,23 +73,24 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const auto& loci_table = absl::GetFlag(FLAGS_loci_table);
-  if (loci_table.empty()) {
-    std::cerr << "Error: no locus table specified." << std::endl;
+  const auto& af_table = absl::GetFlag(FLAGS_af_table);
+  if (af_table.empty()) {
+    std::cerr << "Error: no allele frequency table specified." << std::endl;
     return 1;
   }
 
-  // Read the loci table.
+  // Read the AF table.
   auto gcs_client = cuking::NewGcsClient(1);
-  auto loci_str = gcs_client->Read(loci_table);
-  if (!loci_str.ok()) {
-    std::cerr << "Error: " << loci_str.status() << std::endl;
+  auto af_table_str = gcs_client->Read(af_table);
+  if (!af_table_str.ok()) {
+    std::cerr << "Error: " << af_table_str.status() << std::endl;
     return 1;
   }
-  const uint64_t* loci_array =
-      reinterpret_cast<const uint64_t*>(loci_str->data());
-  const size_t num_loci = loci_str->size() / sizeof(uint64_t);
-  std::cout << "Read " << num_loci << " loci." << std::endl;
+  const AfTableEntry* af_table_array =
+      reinterpret_cast<const AfTableEntry*>(loci_str->data());
+  const size_t af_table_size = af_table_str->size() / sizeof(AfTableEntry);
+  std::cout << "Read " << af_table_size << " allele frequency table entries."
+            << std::endl;
 
   htsFile* const hts_file = bcf_open(input_file.c_str(), "r");
   if (hts_file == nullptr) {
@@ -128,12 +146,22 @@ int main(int argc, char** argv) {
   }
   const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
-  // Allocate space for two bit sets.
-  std::vector<uint64_t> bit_sets((num_loci + 64 - 1) / 64 * 2);
-  uint64_t* const het_bit_set = bit_sets.data();
-  uint64_t* const hom_alt_bit_set = bit_sets.data() + bit_sets.size() / 2;
-  uint64_t last_position = 0, locus_index = 0;
-  uint32_t processed = 0, num_het = 0, num_hom_alt = 0;
+  struct RareVariant {
+    uint64_t global_position;
+    float allele_frequency;
+
+    bool operator<(const RareVariant& other) const {
+      return std::tie(allele_frequency, global_position) <
+             std::tie(other.allele_frequency, other.global_position);
+    }
+  };
+
+  // Use a priority queue to keep the `num_output_variants` with the smallest
+  // allele frequencies, while scanning through all variants in the GVCF file.
+  const size_t num_output_variants = absl::GetFlag(FLAGS_num_output_variants);
+  std::priority_queue<RareVariant> variant_queue;
+
+  uint32_t processed = 0;
   int* genotypes = nullptr;
   const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
   while (bcf_read(hts_file, hts_header, record) == 0) {
@@ -154,19 +182,6 @@ int main(int argc, char** argv) {
                 << std::endl;
       return 1;
     }
-    last_position = global_position;
-
-    // Walk the loci table to check if it contains the current position.
-    while (locus_index < num_loci &&
-           loci_array[locus_index] < global_position) {
-      ++locus_index;
-    }
-    if (locus_index >= num_loci) {
-      break;  // Reached the end of the table.
-    }
-    if (loci_array[locus_index] > global_position) {
-      continue;  // Locus not contained.
-    }
 
     int num_genotypes = 0;
     if (bcf_get_format_int32(hts_header, record, "GT", &genotypes,
@@ -178,23 +193,63 @@ int main(int argc, char** argv) {
     const int gt0 = bcf_gt_allele(genotypes[0]);
     const int gt1 = bcf_gt_allele(genotypes[1]);
 
-    if (gt0 != gt1) {
-      SetBit(het_bit_set, locus_index);
-      ++num_het;
-    } else if (gt0 != 0) {
-      SetBit(hom_alt_bit_set, locus_index);
-      ++num_hom_alt;
+    if (gt0 == 0 && gt1 == 0) {
+      continue;  // hom-ref
+    }
+
+    char allele0 = 0;
+    if (gt0 != 0) {
+      const auto allele = rec->d.allele[gt0];
+      if (strlen(allele) == 1) {
+        allele0 = allele[0];
+      }
+    }
+
+    char allele1 = 0;
+    if (gt1 != 0) {
+      const auto allele = rec->d.allele[gt1];
+      if (strlen(allele) == 1) {
+        allele1 = allele[0];
+      }
+    }
+
+    // Find the minimum allele frequency for this locus + genotypes.
+    const auto min_af = FindMinAf(global_position, allele0, allele1,
+                                  af_table_array, af_table_size);
+
+    if (min_af) {
+      if (variant_queue.size() < num_output_variants) {
+        variant_queue.push({global_position, *min_af});
+      } else if (variant_queue.top().allele_frequency > *min_af) {
+        variant_queue.pop();
+        variant_queue.push({global_position, *min_af});
+      }
     }
   }
 
-  std::cout << "Stats:" << std::endl
-            << "  het: " << num_het << std::endl
-            << "  hom_alt: " << num_hom_alt << std::endl;
+  // Encode the output variant loci using deltas, so we only need 32 bits per
+  // locus.
+  std::vector<uint64_t> global_positions;
+  global_positions.reserve(variant_queue.size()) while (
+      !variant_queue.empty()) {
+    global_positions.push_back(variant_queue.top().global_position);
+    variant_queue.pop();
+  }
+
+  std::sort(global_positions.begin(), global_positions.end());
+
+  std::vector<uint32_t> deltas;
+  deltas.reserve(global_positions.size());
+  uint64_t last_position = 0;
+  for (const uint64_t position : global_positions) {
+    deltas.push_back(position - last_position);
+    last_position = position;
+  }
 
   // Write the output file.
   if (auto status = gcs_client->Write(
-          output_file, std::string(reinterpret_cast<char*>(bit_sets.data()),
-                                   bit_sets.size() * sizeof(uint64_t)));
+          output_file, std::string(reinterpret_cast<char*>(deltas.data()),
+                                   deltas.size() * sizeof(uint32_t)));
       !status.ok()) {
     std::cerr << "Error: " << status << std::endl;
     return 1;
