@@ -172,8 +172,31 @@ std::optional<ReadSamplesResult> ReadSamples(
 __device__ float ComputeRareShare(const uint32_t num_entries,
                                   const uint32_t *const deltas_i,
                                   const uint32_t *const deltas_j) {
-  // TODO
-  return 0.f;
+  uint32_t index_i = 0, index_j = 0;
+  uint64_t position_i = deltas_i[0], position_j = deltas_j[0];
+  uint32_t num_shared = 0;
+  while (true) {
+    if (position_i == position_j) {
+      ++num_shared;
+      if (++index_i == num_entries || ++index_j == num_entries) {
+        break;
+      }
+      position_i += deltas_i[index_i];
+      position_j += deltas_j[index_j];
+    } else if (position_i < position_j) {
+      if (++index_i == num_entries) {
+        break;
+      }
+      position_i += deltas_i[index_i];
+    } else {
+      if (++index_j == num_entries) {
+        break;
+      }
+      position_j += deltas_j[index_j];
+    }
+  }
+
+  return static_cast<float>(num_shared) / num_entries;
 }
 
 // Stores the coefficient for one pair of samples.
