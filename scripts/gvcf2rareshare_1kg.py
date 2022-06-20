@@ -4,8 +4,8 @@ import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:f7b4e6b1cd3a36a22362567a54cc45b6f07b91cd'
-AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af_v1.bin'
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:9426d13886eb1713171555815e34f6ec24d94268'
+AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af_v2.bin'
 
 
 def main():
