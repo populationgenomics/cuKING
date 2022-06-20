@@ -181,6 +181,11 @@ int main(int argc, char** argv) {
 
     const uint64_t global_position = offset->second + record->pos;
 
+    if (bcf_unpack(record, BCF_UN_ALL) != 0) {
+      std::cerr << "Error: failed to unpack record." << std::endl;
+      return 1;
+    }
+
     int num_genotypes = 0;
     if (bcf_get_format_int32(hts_header, record, "GT", &genotypes,
                              &num_genotypes) <= 0 ||
