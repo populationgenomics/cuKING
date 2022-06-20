@@ -35,8 +35,9 @@ def main():
             )
             basename = os.path.basename(gvcf_path)
             rareshare_path = output_path(basename.replace('.g.vcf.gz', '.rareshare'))
+            # TODO: fix command after fixing Dockerfile
             job.command(
-                f'gvcf2rareshare --input={gvcf_path} --output={rareshare_path} --af_table={AF_TABLE_PATH}'
+                f'/app/build/gvcf2rareshare --input={gvcf_path} --output={rareshare_path} --af_table={AF_TABLE_PATH}'
             )
 
     batch.run(wait=False)

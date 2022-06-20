@@ -132,4 +132,4 @@ RUN rm -rf build && \
     cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     cmake --build . -j 16 && \
-    mv cuking gvcf2cuking /usr/local/bin
+    mv cuking gvcf2cuking gvcf2rareshare /usr/local/bin
