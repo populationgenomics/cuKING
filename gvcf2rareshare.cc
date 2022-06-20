@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
-#include <priority_queue>
+#include <queue>
 #include <string>
 #include <string_view>
 
@@ -21,7 +21,7 @@ ABSL_FLAG(std::string, output, "",
 ABSL_FLAG(std::string, af_table, "",
           "The allele frequency table to use, e.g. "
           "gs://some/bucket/gnomad_v3_popmax_af.bin");
-ABSL_FLAG(size_t, num_output_variants, "",
+ABSL_FLAG(size_t, num_output_variants, 10000,
           "How many rare variants to collect.");
 
 namespace {
@@ -38,16 +38,20 @@ std::optional<float> FindMinAf(const uint64_t global_position,
                                const char allele0, const char allele1,
                                const AfTableEntry* const af_table,
                                const size_t af_table_size) {
-  const AfTableEntry search_entry;
+  // First use binary search to find the applicable range.
+  AfTableEntry search_entry;
   search_entry.global_position = global_position;
   const auto iter_pair =
-      std::equal_range(af_table, af_table + af_table_size, position,
+      std::equal_range(af_table, af_table + af_table_size, search_entry,
                        [](const AfTableEntry& lhs, const AfTableEntry& rhs) {
-                         return lhs.global_position < rhs.global_positionl
+                         return lhs.global_position < rhs.global_position;
                        });
+
+  // Then iterate over the range to find the minimum allele frequency, given the
+  // alleles.
   bool found = false;
   float min_af = 1.f;
-  for (auto iter = iter_pair.first(); iter != iter_pair.second(); ++iter) {
+  for (auto iter = iter_pair.first; iter != iter_pair.second; ++iter) {
     if (iter->allele == allele0 || iter->allele == allele1) {
       min_af = std::min(min_af, iter->allele_frequency);
       found = true;
@@ -87,7 +91,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   const AfTableEntry* af_table_array =
-      reinterpret_cast<const AfTableEntry*>(loci_str->data());
+      reinterpret_cast<const AfTableEntry*>(af_table_str->data());
   const size_t af_table_size = af_table_str->size() / sizeof(AfTableEntry);
   std::cout << "Read " << af_table_size << " allele frequency table entries."
             << std::endl;
@@ -176,12 +180,6 @@ int main(int argc, char** argv) {
     }
 
     const uint64_t global_position = offset->second + record->pos;
-    if (global_position < last_position) {
-      std::cerr << "Error: variants not sorted by global position ("
-                << seq_names[record->rid] << ", " << record->pos << ")."
-                << std::endl;
-      return 1;
-    }
 
     int num_genotypes = 0;
     if (bcf_get_format_int32(hts_header, record, "GT", &genotypes,
@@ -199,7 +197,7 @@ int main(int argc, char** argv) {
 
     char allele0 = 0;
     if (gt0 != 0) {
-      const auto allele = rec->d.allele[gt0];
+      const auto allele = record->d.allele[gt0];
       if (strlen(allele) == 1) {
         allele0 = allele[0];
       }
@@ -207,7 +205,7 @@ int main(int argc, char** argv) {
 
     char allele1 = 0;
     if (gt1 != 0) {
-      const auto allele = rec->d.allele[gt1];
+      const auto allele = record->d.allele[gt1];
       if (strlen(allele) == 1) {
         allele1 = allele[0];
       }
@@ -230,8 +228,8 @@ int main(int argc, char** argv) {
   // Encode the output variant loci using deltas, so we only need 32 bits per
   // locus.
   std::vector<uint64_t> global_positions;
-  global_positions.reserve(variant_queue.size()) while (
-      !variant_queue.empty()) {
+  global_positions.reserve(variant_queue.size());
+  while (!variant_queue.empty()) {
     global_positions.push_back(variant_queue.top().global_position);
     variant_queue.pop();
   }
