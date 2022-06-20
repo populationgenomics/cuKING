@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
 
   // Read the AF table.
   auto gcs_client = cuking::NewGcsClient(1);
-  auto af_table_str = gcs_client->Read(af_table);
+  const auto af_table_str = gcs_client->Read(af_table);
   if (!af_table_str.ok()) {
     std::cerr << "Error: " << af_table_str.status() << std::endl;
     return 1;

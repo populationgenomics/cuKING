@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
 
   // Read the loci table.
   auto gcs_client = cuking::NewGcsClient(1);
-  auto loci_str = gcs_client->Read(loci_table);
+  const auto loci_str = gcs_client->Read(loci_table);
   if (!loci_str.ok()) {
     std::cerr << "Error: " << loci_str.status() << std::endl;
     return 1;
