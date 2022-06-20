@@ -200,6 +200,10 @@ int main(int argc, char** argv) {
       continue;  // hom-ref
     }
 
+    if (strlen(record->d.allele[0]) != 1) {
+        continue;  // indel
+    }
+
     char allele0 = 0;
     if (gt0 != 0) {
       const auto allele = record->d.allele[gt0];
