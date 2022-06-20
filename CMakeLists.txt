@@ -17,6 +17,7 @@ find_package(google_cloud_cpp_storage REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 add_executable(cuking cuking.cu)
+add_executable(rareshare rareshare.cu)
 add_executable(gvcf2cuking gvcf2cuking.cc)
 add_executable(gvcf2rareshare gvcf2rareshare.cc)
 
@@ -31,6 +32,13 @@ target_link_libraries(gcs_client PRIVATE
 )
 
 target_link_libraries(cuking PRIVATE
+    absl::flags
+    absl::flags_parse
+    gcs_client
+    nlohmann_json::nlohmann_json
+)
+
+target_link_libraries(rareshare PRIVATE
     absl::flags
     absl::flags_parse
     gcs_client
