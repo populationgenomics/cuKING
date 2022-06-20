@@ -26,7 +26,7 @@ def main():
     for chunk in [paths[i : i + 20] for i in range(0, len(paths), 20)]:
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
-        job.memory('12Gi')
+        job.memory('16Gi')
         job.command('set -x')
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
