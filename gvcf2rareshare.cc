@@ -30,6 +30,7 @@ namespace {
 struct AfTableEntry {
   uint64_t global_position;
   char allele;
+  char unused_padding[3];  // TODO: remove after fixing table.
   float allele_frequency;
 };
 #pragma pack(pop)
