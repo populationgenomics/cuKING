@@ -4,9 +4,8 @@ import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-# TODO: update SHA after fixing table.
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:e2e5c746cc5791769ffec482150c2e468ee6a5eb'
-AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af.bin'
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:f7b4e6b1cd3a36a22362567a54cc45b6f07b91cd'
+AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af_v1.bin'
 
 
 def main():
@@ -35,9 +34,8 @@ def main():
             )
             basename = os.path.basename(gvcf_path)
             rareshare_path = output_path(basename.replace('.g.vcf.gz', '.rareshare'))
-            # TODO: fix command after fixing Dockerfile
             job.command(
-                f'/app/build/gvcf2rareshare --input={gvcf_path} --output={rareshare_path} --af_table={AF_TABLE_PATH}'
+                f'gvcf2rareshare --input={gvcf_path} --output={rareshare_path} --af_table={AF_TABLE_PATH}'
             )
 
     batch.run(wait=False)
