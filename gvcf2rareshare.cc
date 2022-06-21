@@ -243,7 +243,6 @@ int main(int argc, char** argv) {
                                   af_table_array, af_table_size);
 
     if (min_af) {
-      std::cout << "Found" << std::endl;
       if (variant_queue.size() < num_output_variants) {
         variant_queue.push({global_position, *min_af});
       } else if (variant_queue.top().allele_frequency > *min_af) {
