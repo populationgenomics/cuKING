@@ -166,8 +166,12 @@ int main(int argc, char** argv) {
   std::priority_queue<RareVariant> variant_queue;
 
   uint32_t processed = 0;
-  int* genotypes = nullptr;
-  const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
+  int *genotypes = nullptr, *gq = nullptr, *dp = nullptr;
+  const absl::Cleanup free_buffers = [genotypes, gq, dp] {
+    free(genotypes);
+    free(gq);
+    free(dp);
+  };
   while (bcf_read(hts_file, hts_header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
       std::cout << "Processed " << (processed >> 20) << " Mi records..."
@@ -201,7 +205,21 @@ int main(int argc, char** argv) {
     }
 
     if (strlen(record->d.allele[0]) != 1) {
-        continue;  // indel
+      continue;  // indel
+    }
+
+    int num_gq = 0, num_dp = 0;
+    if (bcf_get_format_int32(hts_header, record, "GT", &gq, &num_gq) <= 0 ||
+        num_gq != 1 ||
+        bcf_get_format_int32(hts_header, record, "DP", &dp, &num_dp) <= 0 ||
+        num_dp != 1) {
+      continue;
+    }
+
+    // Filter bad quality calls, inspired by gnomAD criteria:
+    // https://gnomad.broadinstitute.org/news/2020-10-gnomad-v3-1-new-content-methods-annotations-and-data-availability/#the-gnomad-hgdp-and-1000-genomes-callset
+    if (gq[0] < 20 || dp[0] < 10) {
+      continue;
     }
 
     char allele0 = 0;
@@ -225,6 +243,7 @@ int main(int argc, char** argv) {
                                   af_table_array, af_table_size);
 
     if (min_af) {
+      std::cout << "Found" << std::endl;
       if (variant_queue.size() < num_output_variants) {
         variant_queue.push({global_position, *min_af});
       } else if (variant_queue.top().allele_frequency > *min_af) {
