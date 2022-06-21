@@ -26,7 +26,7 @@ def main():
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
         #job.memory('highmem')  # TODO: fix after removing copy
-        job.memory('12Gi')  # TODO: fix after removing copy
+        job.memory('16Gi')  # TODO: fix after removing copy
         job.command('set -x')
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
