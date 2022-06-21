@@ -67,13 +67,9 @@ class GcsClientImpl : public GcsClient {
         return absl::NotFoundError("Couldn't find content-length header");
       }
 
-      std::ostringstream os;
-      os << reader.rdbuf();
-      if (reader.bad()) {
-        return absl::InvalidArgumentError(absl::StrCat(
-            "Failed to read blob ", url, ": ", reader.status().message()));
-      }
-      return os.str();
+      std::string result(*content_length, 0);
+      reader.read(result.data(), *content_length);
+      return std::move(result);
     } catch (const std::exception& e) {
       // Unfortunately the googe-cloud-storage library throws exceptions.
       return absl::InternalError(
