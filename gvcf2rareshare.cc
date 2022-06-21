@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
     }
 
     int num_gq = 0, num_dp = 0;
-    if (bcf_get_format_int32(hts_header, record, "GT", &gq, &num_gq) <= 0 ||
+    if (bcf_get_format_int32(hts_header, record, "GQ", &gq, &num_gq) <= 0 ||
         num_gq != 1 ||
         bcf_get_format_int32(hts_header, record, "DP", &dp, &num_dp) <= 0 ||
         num_dp != 1) {
