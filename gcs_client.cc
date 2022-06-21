@@ -52,7 +52,7 @@ class GcsClientImpl : public GcsClient {
             "Failed to read blob ", url, ": ", reader.status().message()));
       }
 
-      std::optional<int> content_length;
+      std::optional<size_t> content_length;
       for (const auto& header : reader.headers()) {
         if (header.first == "content-length") {
           size_t value = 0;
