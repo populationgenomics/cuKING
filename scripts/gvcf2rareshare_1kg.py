@@ -5,7 +5,7 @@ import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
 DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:9426d13886eb1713171555815e34f6ec24d94268'
-AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af_v2.bin'
+AF_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/gnomad_v3_popmax_af_v3.bin'
 
 
 def main():
@@ -26,7 +26,7 @@ def main():
         job = batch.new_job(chunk[0])
         job.image(DOCKER_IMAGE)
         #job.memory('highmem')  # TODO: fix after removing copy
-        job.memory('12Gi')  # TODO: fix after removing copy
+        job.memory('16Gi')  # TODO: fix after removing copy
         job.command('set -x')
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
