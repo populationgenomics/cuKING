@@ -134,8 +134,12 @@ int main(int argc, char** argv) {
   uint64_t* const hom_alt_bit_set = bit_sets.data() + bit_sets.size() / 2;
   uint64_t last_position = 0, locus_index = 0;
   uint32_t processed = 0, num_het = 0, num_hom_alt = 0;
-  int* genotypes = nullptr;
-  const absl::Cleanup genotypes_free = [genotypes] { free(genotypes); };
+  int *genotypes = nullptr, *gq = nullptr, *dp = nullptr;
+  const absl::Cleanup free_buffers = [genotypes, gq, dp] {
+    free(genotypes);
+    free(gq);
+    free(dp);
+  };
   while (bcf_read(hts_file, hts_header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
       std::cout << "Processed " << (processed >> 20) << " Mi records..."
@@ -168,6 +172,11 @@ int main(int argc, char** argv) {
       continue;  // Locus not contained.
     }
 
+    if (bcf_unpack(record, BCF_UN_ALL) != 0) {
+      std::cerr << "Error: failed to unpack record." << std::endl;
+      return 1;
+    }
+
     int num_genotypes = 0;
     if (bcf_get_format_int32(hts_header, record, "GT", &genotypes,
                              &num_genotypes) <= 0 ||
@@ -178,10 +187,28 @@ int main(int argc, char** argv) {
     const int gt0 = bcf_gt_allele(genotypes[0]);
     const int gt1 = bcf_gt_allele(genotypes[1]);
 
+    if (gt0 == 0 && gt1 == 0) {
+      continue;  // hom-ref
+    }
+
+    int num_gq = 0, num_dp = 0;
+    if (bcf_get_format_int32(hts_header, record, "GQ", &gq, &num_gq) <= 0 ||
+        num_gq != 1 ||
+        bcf_get_format_int32(hts_header, record, "DP", &dp, &num_dp) <= 0 ||
+        num_dp != 1) {
+      continue;
+    }
+
+    // Filter bad quality calls, inspired by gnomAD criteria:
+    // https://gnomad.broadinstitute.org/news/2020-10-gnomad-v3-1-new-content-methods-annotations-and-data-availability/#the-gnomad-hgdp-and-1000-genomes-callset
+    if (gq[0] < 20 || dp[0] < 10) {
+      continue;
+    }
+
     if (gt0 != gt1) {
       SetBit(het_bit_set, locus_index);
       ++num_het;
-    } else if (gt0 != 0) {
+    } else {
       SetBit(hom_alt_bit_set, locus_index);
       ++num_hom_alt;
     }
