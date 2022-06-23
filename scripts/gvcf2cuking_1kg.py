@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
+import click
 import os
 import hailtop.batch as hb
 from cpg_utils.hail_batch import get_config, remote_tmpdir, output_path
 
-DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking:625261a30213b0734527f3b00585f4ecdbaffed0'
-LOCI_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/loci_gnomad_ld_pruned_combined_variants.bin'
+DOCKER_IMAGE = 'australia-southeast1-docker.pkg.dev/cpg-common/images/cuking'
+SITES_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/sites_gnomad_ld_pruned_combined_variants_v2.bin'
 
 
-def main():
+@click.command()
+@click.option(
+    '--image-version', help='Docker image version to use', required=True
+)
+def main(image_version):
     config = get_config()
 
     service_backend = hb.ServiceBackend(
@@ -24,7 +29,8 @@ def main():
     # Process 20 files per job.
     for chunk in [paths[i : i + 20] for i in range(0, len(paths), 20)]:
         job = batch.new_job(chunk[0])
-        job.image(DOCKER_IMAGE)
+        job.image(f'{DOCKER_IMAGE}:{image_version}')
+        job.cpu(0.25)
         job.memory('lowmem')
         job.command('set -x')
         for gvcf_path in chunk:
