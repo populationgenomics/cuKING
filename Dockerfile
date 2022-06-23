@@ -141,8 +141,6 @@ RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/gvcf2rareshare
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
-COPY --from=dev /app/rootfs.tar /
-
-RUN tar xf /rootfs.tar && \
-    rm /rootfs.tar && \
+RUN --mount=type=bind,from=dev,source=/app/rootfs.tar,target=/rootfs.tar \
+    tar xf /rootfs.tar && \
     ldconfig
