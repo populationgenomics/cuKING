@@ -238,6 +238,12 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
   }
 }
 
+// Returns ceil(a / b) for integers a, b.
+template <typename T>
+inline T CeilIntDiv(const T a, const T b) {
+  return (a + b - 1) / b;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -285,9 +291,9 @@ int main(int argc, char **argv) {
 
   const absl::Time time_before = absl::Now();
 
-  constexpr int kCudaBlockSize = 1024;
-  const int kNumCudaBlocks =
-      (num_samples * num_samples + kCudaBlockSize - 1) / kCudaBlockSize;
+  constexpr size_t kCudaBlockSize = 1024;
+  const size_t kNumCudaBlocks =
+      CeilIntDiv(num_samples * num_samples, kCudaBlockSize);
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
       num_samples, samples->num_entries, samples->bit_sets.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), kMaxResults, results.get(),

@@ -6,10 +6,6 @@
 // (see https://github.com/samtools/htslib/pull/446):
 // export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
 // export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-//
-// Example:
-//   ./gvcf2cuking --input=gs://some/bucket/NA12878.g.vcf.gz
-//                 --output=gs://another/bucket/NA12878.cuking
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
@@ -19,6 +15,7 @@
 #include <htslib/vcfutils.h>
 
 #include <cassert>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -29,14 +26,49 @@ ABSL_FLAG(std::string, input, "",
           "The GVCF input path, e.g. gs://some/bucket/NA12878.g.vcf.gz");
 ABSL_FLAG(std::string, output, "",
           "The cuking output path, e.g. gs://another/bucket/NA12878.cuking");
-ABSL_FLAG(std::string, loci_table, "",
-          "The set of loci to retain; everything else will be filtered, e.g. "
-          "gs://some/bucket/loci_popmax_af_gt_0.05.bin");
+ABSL_FLAG(std::string, sites_table, "",
+          "The set of sites (locus + var) to retain; everything else will be "
+          "filtered out, e.g. "
+          "gs://some/bucket/sites_gnomad_ld_pruned_combined_variants_v2.bin");
 
 namespace {
 
-void SetBit(uint64_t* const bit_set, uint64_t index) {
+// Based on boost::hash_combine. Hashes `v` before combining.
+template <typename T>
+inline size_t HashCombine(const size_t seed, const T& v) {
+  return seed ^ (std::hash<T>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+}
+
+// The sites table on disk doesn't use any padding.
+#pragma pack(push, 1)
+struct SitesTableEntry {
+  uint64_t global_position;
+  char allele;
+};
+#pragma pack(pop)
+
+struct SitesTableEntryHash {
+  size_t operator()(const SitesTableEntry& e) const {
+    return HashCombine(std::hash<uint64_t>()(e.global_position), e.allele);
+  }
+};
+
+struct SitesTableEntryEqual {
+  size_t operator()(const SitesTableEntry& lhs,
+                    const SitesTableEntry& rhs) const {
+    return lhs.global_position == rhs.global_position &&
+           lhs.allele == rhs.allele;
+  }
+};
+
+inline void SetBit(uint64_t* const bit_set, uint64_t index) {
   bit_set[index >> 6] |= 1ull << (index & 63ull);
+}
+
+// Returns ceil(a / b) for integers a, b.
+template <typename T>
+inline T CeilIntDiv(const T a, const T b) {
+  return (a + b - 1) / b;
 }
 
 }  // namespace
@@ -56,23 +88,35 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const auto& loci_table = absl::GetFlag(FLAGS_loci_table);
-  if (loci_table.empty()) {
-    std::cerr << "Error: no locus table specified." << std::endl;
+  const auto& sites_table = absl::GetFlag(FLAGS_sites_table);
+  if (sites_table.empty()) {
+    std::cerr << "Error: no sites table specified." << std::endl;
     return 1;
   }
 
-  // Read the loci table.
+  // Read the sites table.
   auto gcs_client = cuking::NewGcsClient(1);
-  const auto loci_str = gcs_client->Read(loci_table);
-  if (!loci_str.ok()) {
-    std::cerr << "Error: " << loci_str.status() << std::endl;
+  auto sites_table_str = gcs_client->Read(sites_table);
+  if (!sites_table_str.ok()) {
+    std::cerr << "Error reading \"" << sites_table
+              << "\": " << sites_table_str.status() << std::endl;
     return 1;
   }
-  const uint64_t* loci_array =
-      reinterpret_cast<const uint64_t*>(loci_str->data());
-  const size_t num_loci = loci_str->size() / sizeof(uint64_t);
-  std::cout << "Read " << num_loci << " loci." << std::endl;
+
+  const SitesTableEntry* sites_table_array =
+      reinterpret_cast<const SitesTableEntry*>(sites_table_str->data());
+  const size_t num_sites = sites_table_str->size() / sizeof(SitesTableEntry);
+  std::cout << "Read " << num_sites << " sites." << std::endl;
+
+  // Hash each site to its index, which will be used in the bit set.
+  absl::flat_hash_map<SitesTableEntry, uint64_t, SitesTableEntryHash,
+                      SitesTableEntryEqual>
+      index_by_site;
+  for (uint64_t i = 0; i < num_sites; ++i) {
+    index_by_site[sites_table_array[i]] = i;
+  }
+
+  sites_table_str->clear();  // Free memory.
 
   htsFile* const hts_file = bcf_open(input_file.c_str(), "r");
   if (hts_file == nullptr) {
@@ -129,10 +173,9 @@ int main(int argc, char** argv) {
   const absl::Cleanup record_destroyer = [record] { bcf_destroy(record); };
 
   // Allocate space for two bit sets.
-  std::vector<uint64_t> bit_sets((num_loci + 64 - 1) / 64 * 2);
+  std::vector<uint64_t> bit_sets(CeilIntDiv<size_t>(num_sites, 64) * 2);
   uint64_t* const het_bit_set = bit_sets.data();
   uint64_t* const hom_alt_bit_set = bit_sets.data() + bit_sets.size() / 2;
-  uint64_t last_position = 0, locus_index = 0;
   uint32_t processed = 0, num_het = 0, num_hom_alt = 0;
   int *genotypes = nullptr, *gq = nullptr, *dp = nullptr;
   const absl::Cleanup free_buffers = [genotypes, gq, dp] {
@@ -140,6 +183,8 @@ int main(int argc, char** argv) {
     free(gq);
     free(dp);
   };
+
+  // Read the GVCF one record at a time.
   while (bcf_read(hts_file, hts_header, record) == 0) {
     if ((++processed & ((1 << 20) - 1)) == 0) {
       std::cout << "Processed " << (processed >> 20) << " Mi records..."
@@ -150,27 +195,7 @@ int main(int argc, char** argv) {
     if (offset == chr_offsets.end()) {
       continue;  // Ignore this contig, e.g. alts.
     }
-
     const uint64_t global_position = offset->second + record->pos;
-    if (global_position < last_position) {
-      std::cerr << "Error: variants not sorted by global position ("
-                << seq_names[record->rid] << ", " << record->pos << ")."
-                << std::endl;
-      return 1;
-    }
-    last_position = global_position;
-
-    // Walk the loci table to check if it contains the current position.
-    while (locus_index < num_loci &&
-           loci_array[locus_index] < global_position) {
-      ++locus_index;
-    }
-    if (locus_index >= num_loci) {
-      break;  // Reached the end of the table.
-    }
-    if (loci_array[locus_index] > global_position) {
-      continue;  // Locus not contained.
-    }
 
     if (bcf_unpack(record, BCF_UN_ALL) != 0) {
       std::cerr << "Error: failed to unpack record." << std::endl;
@@ -184,11 +209,15 @@ int main(int argc, char** argv) {
       continue;  // GT not present or unexpected number of GT entries.
     }
 
-    const int gt0 = bcf_gt_allele(genotypes[0]);
-    const int gt1 = bcf_gt_allele(genotypes[1]);
+    const int gt[2] = {bcf_gt_allele(genotypes[0]),
+                       bcf_gt_allele(genotypes[1])};
 
-    if (gt0 == 0 && gt1 == 0) {
-      continue;  // hom-ref
+    if (gt[0] == 0 && gt[1] == 0) {
+      continue;  // Ignore hom-ref.
+    }
+
+    if (strlen(record->d.allele[0]) != 1) {
+      continue;  // Ignore indels.
     }
 
     int num_gq = 0, num_dp = 0;
@@ -205,12 +234,36 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    if (gt0 != gt1) {
-      SetBit(het_bit_set, locus_index);
-      ++num_het;
-    } else {
-      SetBit(hom_alt_bit_set, locus_index);
-      ++num_hom_alt;
+    const auto find_index = [&](const uint64_t global_position,
+                                const int genotype) {
+      const char* const allele = record->d.allele[genotype];
+      if (strlen(allele) != 1) {
+        return std::optional<uint64_t>();  // Ignore indels.
+      }
+
+      const auto index = index_by_site.find({global_position, allele[0]});
+      if (index == index_by_site.end()) {
+        return std::optional<uint64_t>();  // Filtered out.
+      }
+
+      return std::optional<uint64_t>(index->second);
+    };
+
+    if (gt[0] == gt[1]) {  // Hom-alt.
+      if (const auto index = find_index(global_position, gt[0]); index) {
+        SetBit(hom_alt_bit_set, *index);
+        ++num_hom_alt;
+      }
+    } else {  // Heterozygous, potentially with two non-ref alleles.
+      for (int k = 0; k < 2; ++k) {
+        if (gt[k] == 0) {
+          continue;
+        }
+        if (const auto index = find_index(global_position, gt[k]); index) {
+          SetBit(het_bit_set, *index);
+          ++num_het;
+        }
+      }
     }
   }
 
