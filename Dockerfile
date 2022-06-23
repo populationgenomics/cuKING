@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.7.0-devel-ubuntu22.04
+FROM nvidia/cuda:11.7.0-devel-ubuntu22.04 AS dev
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -124,6 +124,10 @@ RUN mkdir -p /deps/htslib && cd /deps/htslib && \
     make -j 16 install && \
     ldconfig
 
+# extract-elf-so tars .so files to create small Docker images.
+RUN curl -sSL -o /deps/extract-elf-so https://github.com/William-Yeh/extract-elf-so/releases/download/v0.6/extract-elf-so_static_linux-amd64 && \
+    chmod +x /deps/extract-elf-so
+
 COPY . /app/
 WORKDIR /app
 
@@ -131,5 +135,14 @@ RUN rm -rf build && \
     mkdir build && \
     cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    cmake --build . -j 16 && \
-    mv cuking gvcf2cuking gvcf2rareshare /usr/local/bin
+    cmake --build . -j 16
+
+RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/gvcf2rareshare /app/build/cuking /app/build/rareshare
+
+FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
+
+COPY --from=dev /app/rootfs.tar /
+
+RUN tar xf /rootfs.tar && \
+    rm /rootfs.tar && \
+    ldconfig
