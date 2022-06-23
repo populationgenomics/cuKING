@@ -41,7 +41,7 @@ def main(image_version):
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
             job.command(
-                f'gvcf2cuking --input={gvcf_path} --output={cuking_path} --loci_table={LOCI_TABLE_PATH}'
+                f'gvcf2cuking --input={gvcf_path} --output={cuking_path} --sites_table={SITES_TABLE_PATH}'
             )
 
     batch.run(wait=False)
