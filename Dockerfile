@@ -141,6 +141,10 @@ RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/gvcf2rareshare
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
+# Tools to fetch service account access tokens.
+RUN apt update && apt install --no-install-recommends -y curl jq && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN --mount=type=bind,from=dev,source=/app/rootfs.tar,target=/rootfs.tar \
     tar xf /rootfs.tar && \
     ldconfig

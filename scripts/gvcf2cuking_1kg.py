@@ -35,7 +35,7 @@ def main(image_version):
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
             job.command(
-                'export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)'
+                'export GCS_OAUTH_TOKEN=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token -H "Metadata-Flavor: Google" | jq -r .access_token)'
             )
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
