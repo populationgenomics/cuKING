@@ -10,8 +10,6 @@ jobs:
       CLOUDSDK_CORE_DISABLE_PROMPTS: 1
 
     steps:
-      - uses: actions/checkout@v3
-
       - name: gcloud setup
         uses: google-github-actions/setup-gcloud@v0
         with:
