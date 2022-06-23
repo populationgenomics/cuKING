@@ -141,9 +141,12 @@ RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/gvcf2rareshare
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
-# Tools to fetch service account access tokens.
-RUN apt update && apt install --no-install-recommends -y curl jq && \
-    rm -rf /var/lib/apt/lists/*
+# Python is much smaller than installing the Google Cloud SDK for fetching access tokens.
+RUN apt update && apt install --no-install-recommends -y python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip3 install google-auth requests
+
+COPY scripts/print_google_service_account_access_token.py /usr/local/bin/
 
 RUN --mount=type=bind,from=dev,source=/app/rootfs.tar,target=/rootfs.tar \
     tar xf /rootfs.tar && \

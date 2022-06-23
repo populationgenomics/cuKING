@@ -10,9 +10,7 @@ SITES_TABLE_PATH = 'gs://cpg-thousand-genomes-main/cuking/sites_gnomad_ld_pruned
 
 
 @click.command()
-@click.option(
-    '--image-version', help='Docker image version to use', required=True
-)
+@click.option('--image-version', help='Docker image version to use', required=True)
 def main(image_version):
     config = get_config()
 
@@ -35,7 +33,7 @@ def main(image_version):
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
             job.command(
-                'export GCS_OAUTH_TOKEN=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token -H "Metadata-Flavor: Google" | jq -r .access_token)'
+                'export GCS_OAUTH_TOKEN=$(print_google_service_account_access_token.py)'
             )
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
