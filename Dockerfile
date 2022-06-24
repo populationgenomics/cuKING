@@ -137,7 +137,7 @@ RUN rm -rf build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     cmake --build . -j 16
 
-RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/gvcf2rareshare /app/build/cuking /app/build/rareshare
+RUN /deps/extract-elf-so --cert /app/build/gvcf2cuking /app/build/cuking
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
