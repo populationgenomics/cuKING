@@ -29,7 +29,6 @@ def main(image_version):
         job = batch.new_job(chunk[0])
         job.image(f'{DOCKER_IMAGE}:{image_version}')
         job.memory('lowmem')
-        job.command('set -x')
         for gvcf_path in chunk:
             # Need to refresh the token regularly.
             job.command(
@@ -37,8 +36,9 @@ def main(image_version):
             )
             basename = os.path.basename(gvcf_path)
             cuking_path = output_path(basename.replace('.g.vcf.gz', '.cuking'))
+            # Wrap in "set -x" to print command, but not put access token in logs.
             job.command(
-                f'gvcf2cuking --input={gvcf_path} --output={cuking_path} --sites_table={SITES_TABLE_PATH}'
+                f'set -x; gvcf2cuking --input={gvcf_path} --output={cuking_path} --sites_table={SITES_TABLE_PATH}; set +x'
             )
 
     batch.run(wait=False)
