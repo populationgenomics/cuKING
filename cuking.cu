@@ -179,6 +179,7 @@ __device__ float ComputeKing(const uint32_t num_entries,
                              const uint64_t *const het_j_entries,
                              const uint64_t *const hom_alt_j_entries) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
+  // TODO: add mask for missing entries.
   uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t k = 0; k < num_entries; ++k) {
     const uint64_t het_i = het_i_entries[k];
