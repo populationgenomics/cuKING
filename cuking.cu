@@ -179,20 +179,22 @@ __device__ float ComputeKing(const uint32_t num_entries,
                              const uint64_t *const het_j_entries,
                              const uint64_t *const hom_alt_j_entries) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
-  // TODO: add mask for missing entries.
   uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t k = 0; k < num_entries; ++k) {
     const uint64_t het_i = het_i_entries[k];
     const uint64_t hom_alt_i = hom_alt_i_entries[k];
     const uint64_t het_j = het_j_entries[k];
     const uint64_t hom_alt_j = hom_alt_j_entries[k];
-    const uint64_t hom_ref_i = (~hom_alt_i) & (~het_i);
-    const uint64_t hom_ref_j = (~hom_alt_j) & (~het_j);
-    num_het_i += __popcll(het_i);
-    num_het_j += __popcll(het_j);
-    num_both_het += __popcll(het_i & het_j);
+    const uint64_t hom_ref_i = (~het_i) & (~hom_alt_i);
+    const uint64_t hom_ref_j = (~het_j) & (~hom_alt_j);
+    const uint64_t missing_mask_i = ~(het_i & hom_alt_i);
+    const uint64_t missing_mask_j = ~(het_j & hom_alt_j);
+    const uint64_t missing_mask = missing_mask_i & missing_mask_j;
+    num_het_i += __popcll(het_i & missing_mask_i);
+    num_het_j += __popcll(het_j & missing_mask_j);
+    num_both_het += __popcll(het_i & het_j & missing_mask);
     num_opposing_hom +=
-        __popcll((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i));
+        __popcll(((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i)) & missing_mask);
   }
 
   // Return the "between-family" estimator.
