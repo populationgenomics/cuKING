@@ -24,12 +24,7 @@ def main(input, sites, output):
 
     vds = hl.vds.read_vds(input)
 
-    # Convert to purely biallelic sites prior to site filtering. This also takes care of LGT -> GT conversion.
-    vds = hl.vds.split_multi(vds)
-
-    # Fill in hom-ref calls.
-    mt = hl.vds.to_dense_mt(vds)
-
+    # Filter samples.
     # TODO: remove this once the duplicate samples have been removed from the input.
     import collections
 
@@ -38,11 +33,19 @@ def main(input, sites, output):
         for item, count in collections.Counter(vds.variant_data.s.collect()).items()
         if count > 1
     ]
-    mt = mt.filter_cols(hl.set(duplicate_samples).contains(mt.s), keep=False)
+    vds.variant_data = vds.variant_data.filter_cols(
+        hl.set(duplicate_samples).contains(vds.variant_data.s), keep=False
+    )
+
+    # Convert to purely biallelic sites prior to site filtering. This also takes care of LGT -> GT conversion.
+    vds = hl.vds.split_multi(vds)
 
     # Filter to sites table.
     sites_table = hl.read_table(sites)
-    mt = mt.semi_join_rows(sites_table)
+    vds = hl.vds.filter_variants(vds, sites_table)
+
+    # Fill in hom-ref calls before applying variant filtering.
+    mt = hl.vds.to_dense_mt(vds)
 
     # Apply basic variant QC.
     mt = annotate_adj(mt)
