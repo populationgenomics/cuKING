@@ -3,7 +3,8 @@
 """Filters a VDS using a given sites table, precomputes fields necessary for KING, and exports the result as Parquet partitions.
 
 hailctl dataproc start --service-account=dataproc-service-account@cpg-gnomad-v4-relatedness.iam.gserviceaccount.com \
-    --max-idle=5m --num-secondary-workers=20 --packages gnomad vds-to-packed-parquet && \
+    --max-idle=5m --num-secondary-workers=20 --packages gnomad \
+    --requester-pays-allow-buckets=sites-for-relatedness-transfer-au-tmp vds-to-packed-parquet && \
 hailctl dataproc submit vds-to-packed-parquet vds_to_packed_parquet.py \
     --input=gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test.vds \
     --sites=gs://sites-for-relatedness-transfer-au-tmp/ukb_sites.ht \
