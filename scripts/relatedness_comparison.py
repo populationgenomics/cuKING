@@ -12,6 +12,16 @@ from gnomad.utils.annotations import annotate_adj
 import hail as hl
 
 
+def write_if_not_exists(table, path):
+    if not hl.utils.hadoop_exists(path):
+        table.write(path)
+    if isinstance(table, hl.table.Table):
+        return hl.read_table(path)
+    if isinstance(table, hl.matrixtable.MatrixTable):
+        return hl.read_matrix_table(path)
+    raise ValueError(f'Unexpected table type {type(table)}')
+
+
 def main():
     hl.init(default_reference='GRCh38')
 
@@ -50,29 +60,31 @@ def main():
 
     # Store GT-only table before running relatedness methods.
     mt = mt.select_entries(mt.GT)
-    mt.write('gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites.mt')
-    mt = hl.read_matrix_table(
-        'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites.mt'
+    mt = write_if_not_exists(
+        mt, 'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites.mt'
     )
 
     # Compute KING.
     king = hl.king(mt.GT)
-    king.write(
-        'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_king.mt'
+    king = write_if_not_exists(
+        king,
+        'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_king.mt',
     )
 
     # Compute PC-Relate.
     for min_individual_maf in (0.01, 0.05):
+        # Typically we'd pass min_kinship=0.05 here, but in order to compare with KING
+        # results, we don't filter.
         pc_relate = hl.pc_relate(
             mt.GT,
             min_individual_maf=min_individual_maf,
             k=10,
-            min_kinship=0.05,
             block_size=4096,
             statistics="all",
         )
-        pc_relate.write(
-            f'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_pc_relate_{min_individual_maf}.ht'
+        pc_relate = write_if_not_exists(
+            pc_relate,
+            f'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_pc_relate_{min_individual_maf}.ht',
         )
 
 
