@@ -71,20 +71,28 @@ def main():
         'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_king.mt',
     )
 
+    # Compute PCA for PC-Relate.
+    _, scores, _ = hl.hwe_normalized_pca(mt.GT, k=10, compute_loadings=False)
+
+    scores = write_if_not_exists(
+        scores,
+        'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_pca_scores.ht',
+    )
+
     # Compute PC-Relate.
-    for min_individual_maf in (0.01, 0.05):
+    for min_individual_maf in (0.001, 0.01, 0.05):
         # Typically we'd pass min_kinship=0.05 here, but in order to compare with KING
         # results, we don't filter.
         pc_relate = hl.pc_relate(
             mt.GT,
             min_individual_maf=min_individual_maf,
-            k=10,
+            scores_expr=scores[mt.col_key].scores,
             block_size=4096,
             statistics="all",
         )
         pc_relate = write_if_not_exists(
             pc_relate,
-            f'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_pc_relate_{min_individual_maf}.ht',
+            f'gs://sites-for-relatedness-transfer-au-tmp/gnomad_v4.0_test_ukb_sites_pc_relate_{min_individual_maf}_based_on_scores.ht',
         )
 
 
