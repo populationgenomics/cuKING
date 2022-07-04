@@ -10,12 +10,11 @@
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <queue>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "gcs_client.h"
+#include "thread_pool.h"
 
 ABSL_FLAG(std::string, sample_map, "",
           "A JSON file mapping sample IDs to cuking input paths, e.g. "
@@ -34,64 +33,6 @@ ABSL_FLAG(
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
 
 namespace {
-
-// Adapted from the Abseil thread pool.
-class ThreadPool {
- public:
-  explicit ThreadPool(const int num_threads) {
-    assert(num_threads > 0);
-    for (int i = 0; i < num_threads; ++i) {
-      threads_.push_back(std::thread(&ThreadPool::WorkLoop, this));
-    }
-  }
-
-  ThreadPool(const ThreadPool &) = delete;
-  ThreadPool &operator=(const ThreadPool &) = delete;
-
-  ~ThreadPool() {
-    {
-      absl::MutexLock l(&mu_);
-      for (size_t i = 0; i < threads_.size(); i++) {
-        queue_.push(nullptr);  // Shutdown signal.
-      }
-    }
-    for (auto &t : threads_) {
-      t.join();
-    }
-  }
-
-  // Schedule a function to be run on a ThreadPool thread immediately.
-  void Schedule(std::function<void()> func) {
-    assert(func != nullptr);
-    absl::MutexLock l(&mu_);
-    queue_.push(std::move(func));
-  }
-
- private:
-  bool WorkAvailable() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    return !queue_.empty();
-  }
-
-  void WorkLoop() {
-    while (true) {
-      std::function<void()> func;
-      {
-        absl::MutexLock l(&mu_);
-        mu_.Await(absl::Condition(this, &ThreadPool::WorkAvailable));
-        func = std::move(queue_.front());
-        queue_.pop();
-      }
-      if (func == nullptr) {  // Shutdown signal.
-        break;
-      }
-      func();
-    }
-  }
-
-  absl::Mutex mu_;
-  std::queue<std::function<void()>> queue_ ABSL_GUARDED_BY(mu_);
-  std::vector<std::thread> threads_;
-};
 
 // Custom deleter for RAII-style CUDA-managed array.
 template <typename T>
@@ -124,7 +65,7 @@ struct ReadSamplesResult {
 std::optional<ReadSamplesResult> ReadSamples(
     const std::vector<std::string> &paths,
     cuking::GcsClient *const gcs_client) {
-  ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
+  cuking::ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
   absl::BlockingCounter blocking_counter(paths.size());
   absl::Mutex mutex;
   ReadSamplesResult result ABSL_GUARDED_BY(mutex);
@@ -193,8 +134,8 @@ __device__ float ComputeKing(const uint32_t num_entries,
     num_het_i += __popcll(het_i & missing_mask_i);
     num_het_j += __popcll(het_j & missing_mask_j);
     num_both_het += __popcll(het_i & het_j & missing_mask);
-    num_opposing_hom +=
-        __popcll(((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i)) & missing_mask);
+    num_opposing_hom += __popcll(
+        ((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i)) & missing_mask);
   }
 
   // Return the "between-family" estimator.

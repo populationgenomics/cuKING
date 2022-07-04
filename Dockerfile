@@ -141,6 +141,8 @@ RUN mkdir -p /deps/arrow && cd /deps/arrow && \
 RUN curl -sSL -o /deps/extract-elf-so https://github.com/William-Yeh/extract-elf-so/releases/download/v0.6/extract-elf-so_static_linux-amd64 && \
     chmod +x /deps/extract-elf-so
 
+FROM dev as extract
+
 COPY . /app/
 WORKDIR /app
 
@@ -154,8 +156,6 @@ RUN /deps/extract-elf-so --cert /app/build/cuking
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
-COPY scripts/print_google_service_account_access_token.py /usr/local/bin/
-
-RUN --mount=type=bind,from=dev,source=/app/rootfs.tar,target=/rootfs.tar \
+RUN --mount=type=bind,from=extract,source=/app/rootfs.tar,target=/rootfs.tar \
     tar xf /rootfs.tar && \
     ldconfig
