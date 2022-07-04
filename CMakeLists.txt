@@ -36,7 +36,7 @@ target_link_libraries(packed_parquet_to_bitset PRIVATE
     absl::flags_parse
     absl::status
     arrow_shared
-    arrow_dataset
+    parquet
 )
 
 target_link_libraries(cuking PRIVATE
