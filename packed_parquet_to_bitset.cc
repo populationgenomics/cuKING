@@ -53,35 +53,25 @@ inline void AtomicClearBit(uint64_t* const bit_set, uint64_t index) {
                      __ATOMIC_RELAXED);
 }
 
-// Parallelizes over a given range.
-absl::Status ParallelFor(const size_t n,
-                         std::function<absl::Status(size_t index)> func,
-                         cuking::ThreadPool* const thread_pool) {
-  absl::BlockingCounter blocking_counter(n);
-  absl::Mutex mu;
-  absl::Status result ABSL_GUARDED_BY(mu);
-  for (size_t i = 0; i < n; ++i) {
-    thread_pool->Schedule([&, i] {
-      auto status = func(i);
-      if (!status.ok()) {
-        const absl::MutexLock lock(&mu);
-        result = std::move(status);
-      }
-      blocking_counter.DecrementCount();
-    });
+// Keeps track of time intervals.
+class StopWatch {
+ public:
+  absl::Duration GetElapsedAndReset() {
+    const auto now = absl::Now();
+    const auto result = now - last_time_;
+    last_time_ = now;
+    return result;
   }
-  blocking_counter.Wait();
-  return result;
-}
+
+ private:
+  absl::Time last_time_ = absl::Now();
+};
 
 absl::Status Run() {
-  const size_t num_threads = absl::GetFlag(FLAGS_num_threads);
-  arrow::io::SetIOThreadPoolCapacity(num_threads);
-
   // Initialize the dataset.
   std::cout << "Listing files...";
   std::cout.flush();
-  absl::Time time_before = absl::Now();
+  StopWatch stop_watch;
   const auto input_uri = absl::GetFlag(FLAGS_input_uri);
   std::string input_path;
   ASSIGN_OR_RETURN(const auto input_fs,
@@ -89,8 +79,7 @@ absl::Status Run() {
   arrow::fs::FileSelector file_selector;
   file_selector.base_dir = input_path;
   ASSIGN_OR_RETURN(auto file_infos, input_fs->GetFileInfo(file_selector));
-  absl::Time time_after = absl::Now();
-  std::cout << " (" << (time_after - time_before) << ")" << std::endl;
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Only keep Parquet files.
   file_infos.erase(std::remove_if(file_infos.begin(), file_infos.end(),
@@ -108,24 +97,17 @@ absl::Status Run() {
   std::cout.flush();
   std::vector<std::shared_ptr<parquet::FileMetaData>> file_metadata(
       file_infos.size());
-  cuking::ThreadPool thread_pool(num_threads);
-  time_before = absl::Now();
-  RETURN_IF_ERROR(ParallelFor(
-      file_infos.size(),
+  cuking::ThreadPool thread_pool(absl::GetFlag(FLAGS_num_threads));
+  RETURN_IF_ERROR(cuking::ParallelFor(
+      0, file_infos.size(),
       [&](const size_t i) {
         ASSIGN_OR_RETURN(auto input_file,
                          input_fs->OpenInputFile(file_infos[i]));
-        auto metadata = parquet::ReadMetaData(input_file);
-        if (!metadata) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "Failed to read metadata for ", file_infos[i].path()));
-        }
-        file_metadata[i] = std::move(metadata);
+        file_metadata[i] = parquet::ReadMetaData(input_file);
         return absl::OkStatus();
       },
       &thread_pool));
-  time_after = absl::Now();
-  std::cout << " (" << (time_after - time_before) << ")" << std::endl;
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   std::vector<size_t> row_offsets;
   row_offsets.reserve(file_infos.size());
