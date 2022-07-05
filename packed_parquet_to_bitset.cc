@@ -9,14 +9,18 @@
 #include <parquet/metadata.h>
 
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 #include "status_macros.h"
 #include "thread_pool.h"
 
 ABSL_FLAG(std::string, input_uri, "",
-          "URI containing Parquet table partitions, supports file:// as well "
+          "URI containing Parquet table partitions. Supports file:// as well "
           "as gs://, e.g. gs://some/bucket/my_table.parquet");
+ABSL_FLAG(std::string, output_uri, "",
+          "URI of a directory to write outputs to. Supports file:// as well "
+          "as gs://, e.g. gs://some/bucket/my_table.cuking");
 ABSL_FLAG(size_t, num_threads, 100,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
@@ -61,11 +65,24 @@ class StopWatch {
 };
 
 absl::Status Run() {
+  // Validate flags.
+  const auto input_uri = absl::GetFlag(FLAGS_input_uri);
+  if (input_uri.empty()) {
+    return absl::InvalidArgumentError("No input URI specified");
+  }
+  const auto output_uri = absl::GetFlag(FLAGS_output_uri);
+  if (output_uri.empty()) {
+    return absl::InvalidArgumentError("No output URI specified");
+  }
+  const auto num_threads = absl::GetFlag(FLAGS_num_threads);
+  if (num_threads == 0) {
+    return absl::InvalidArgumentError("Invalid number of threads requested");
+  }
+
   // Initialize the input dataset.
   std::cout << "Listing input files...";
   std::cout.flush();
   StopWatch stop_watch;
-  const auto input_uri = absl::GetFlag(FLAGS_input_uri);
   std::string input_path;
   ASSIGN_OR_RETURN(const auto input_fs,
                    arrow::fs::FileSystemFromUri(input_uri, &input_path));
@@ -89,11 +106,10 @@ absl::Status Run() {
   std::cout.flush();
   std::vector<std::shared_ptr<parquet::FileMetaData>> file_metadata(
       file_infos.size());
-  cuking::ThreadPool thread_pool(absl::GetFlag(FLAGS_num_threads));
+  cuking::ThreadPool thread_pool(num_threads);
   std::atomic<size_t> num_processed(0);
   RETURN_IF_ERROR(cuking::ParallelFor(
-      0, file_infos.size(),
-      [&](const size_t i) {
+      &thread_pool, 0, file_infos.size(), [&](const size_t i) {
         ASSIGN_OR_RETURN(auto input_file,
                          input_fs->OpenInputFile(file_infos[i]));
         file_metadata[i] = parquet::ReadMetaData(input_file);
@@ -102,8 +118,7 @@ absl::Status Run() {
           std::cout.flush();
         }
         return absl::OkStatus();
-      },
-      &thread_pool));
+      }));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Compute the overall row offset per partition (a reduction).
@@ -122,18 +137,17 @@ absl::Status Run() {
   // MatrixTable, we concatenate each sample's columns across all partitions,
   // storing the results sequentially in a bit set. Each sample gets its own set
   // of words in the bit set, to facilitate comparing any two samples. Each
-  // genotype is split into two bits (is_het / is_hom_var), in distinct bit
-  // sets. We initialize all bits to 1 as that indicates a missing value (i.e.
-  // is_het and is_hom_var are both set). That's why below we only ever have to
-  // clear bits (AtomicClearBit).
-  const size_t words_per_sample = CeilIntDiv(num_rows, size_t(64));
+  // genotype is split into two bits (is_het followed by is_hom_var for each
+  // sample), in distinct bit sets. We initialize all bits to 1 as that
+  // indicates a missing value (i.e. is_het and is_hom_var are both set). That's
+  // why below we only ever have to clear bits (AtomicClearBit).
+  const size_t words_per_sample = 2 * CeilIntDiv(num_rows, size_t(64));
   const size_t bit_set_size = words_per_sample * num_cols;
   std::cout << "Allocating "
             << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 30)
             << " GiB of memory for bit sets...";
   std::cout.flush();
-  std::vector<uint64_t> is_het(words_per_sample * num_cols, uint64_t(-1));
-  std::vector<uint64_t> is_hom_var(words_per_sample * num_cols, uint64_t(-1));
+  std::vector<uint64_t> bit_set(words_per_sample * num_cols, uint64_t(-1));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Read all the partitions fully, updating the bit sets as we go.
@@ -141,8 +155,7 @@ absl::Status Run() {
   std::cout.flush();
   num_processed = 0;
   RETURN_IF_ERROR(cuking::ParallelFor(
-      0, file_infos.size(),
-      [&](const size_t i) {
+      &thread_pool, 0, file_infos.size(), [&](const size_t i) {
         const auto& metadata = file_metadata[i];
         if (size_t(metadata->num_columns()) != num_cols) {
           return absl::FailedPreconditionError(absl::StrCat(
@@ -175,9 +188,8 @@ absl::Status Run() {
 
             // Pointers to the beginning of the bit set for this sample.
             uint64_t* const is_het_ptr =
-                is_het.data() + column * words_per_sample;
-            uint64_t* const is_hom_var_ptr =
-                is_hom_var.data() + column * words_per_sample;
+                bit_set.data() + column * words_per_sample;
+            uint64_t* const is_hom_var_ptr = is_het_ptr + words_per_sample / 2;
 
             // Read all values in this column.
             size_t row = row_offsets[i];
@@ -217,14 +229,47 @@ absl::Status Run() {
           std::cout.flush();
         }
         return absl::OkStatus();
-      },
-      &thread_pool));
+      }));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  // Write the bit sets to a single output file, with a JSON header.
+  // Write both a JSON metadata descriptor as well as the packed bit sets to the
+  // output directory.
   std::cout << "Writing output...";
   std::cout.flush();
-  // TODO: define header and actually write.
+  std::string output_path;
+  ASSIGN_OR_RETURN(const auto output_fs,
+                   arrow::fs::FileSystemFromUri(output_uri, &output_path));
+  RETURN_IF_ERROR(output_fs->CreateDir(output_path));
+  while (output_path.back() == '/') {
+    output_path.pop_back();  // Remove trailing slashes.
+  }
+
+  auto* const schema = file_metadata.front()->schema();
+  std::vector<std::string_view> sample_names;
+  sample_names.reserve(num_cols);
+  for (size_t i = 0; i < num_cols; ++i) {
+    sample_names.push_back(schema->Column(i)->name());
+  }
+
+  nlohmann::json metadata;
+  metadata["samples"] = std::move(sample_names);
+  metadata["num_sites"] = num_rows;
+  metadata["words_per_sample"] = words_per_sample;
+  metadata["creation_time"] = absl::FormatTime(absl::Now());
+
+  ASSIGN_OR_RETURN(
+      auto metadata_output_stream,
+      output_fs->OpenOutputStream(absl::StrCat(output_path, "/metadata.json")));
+  RETURN_IF_ERROR(metadata_output_stream->Write(metadata.dump()));
+  RETURN_IF_ERROR(metadata_output_stream->Close());
+
+  ASSIGN_OR_RETURN(
+      auto bit_set_output_stream,
+      output_fs->OpenOutputStream(absl::StrCat(output_path, "/bit_set.bin")));
+  RETURN_IF_ERROR(bit_set_output_stream->Write(
+      bit_set.data(), bit_set.size() * sizeof(uint64_t)));
+  RETURN_IF_ERROR(bit_set_output_stream->Close());
+
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   return absl::OkStatus();

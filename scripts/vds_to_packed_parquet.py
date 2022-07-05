@@ -15,6 +15,9 @@ import click
 from gnomad.utils.annotations import annotate_adj
 import hail as hl
 
+# str.removesuffix is only available in Python >= 3.9.
+def remove_suffix(s: str, suffix: str) -> str:
+    return s[:-len(suffix)] if s.endswith(suffix) else s
 
 @click.command()
 @click.option("--input", help="Input path for VDS", required=True)
@@ -65,6 +68,9 @@ def main(input, sites, output):
     # Remove locus and alleles key, as we only need a row index.
     ht = ht.key_by()
     ht = ht.drop(ht.locus, ht.alleles)
+
+    # Remove the ".packed_gt" suffix from the column names.
+    ht = ht.rename({s : remove_suffix(s, '.packed_gt') for s in ht.row})
 
     # Export to one Parquet file per partition.
     ht.to_spark().write.parquet(output)
