@@ -8,6 +8,7 @@
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 
+#include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <vector>
@@ -89,7 +90,6 @@ absl::Status Run() {
   arrow::fs::FileSelector file_selector;
   file_selector.base_dir = input_path;
   ASSIGN_OR_RETURN(auto file_infos, input_fs->GetFileInfo(file_selector));
-  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Only keep Parquet files.
   file_infos.erase(std::remove_if(file_infos.begin(), file_infos.end(),
@@ -99,6 +99,13 @@ absl::Status Run() {
   if (file_infos.empty()) {
     return absl::FailedPreconditionError("No Parquet files found");
   }
+
+  // Sorting isn't strictly necessary, but will make outputs deterministic.
+  std::sort(
+      file_infos.begin(), file_infos.end(),
+      [](const auto& lhs, const auto& rhs) { return lhs.path() < rhs.path(); });
+
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
   std::cout << "Found " << file_infos.size() << " input files." << std::endl;
 
   // Read the metadata only to determine the row count per partition.
@@ -144,8 +151,8 @@ absl::Status Run() {
   const size_t words_per_sample = 2 * CeilIntDiv(num_rows, size_t(64));
   const size_t bit_set_size = words_per_sample * num_cols;
   std::cout << "Allocating "
-            << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 30)
-            << " GiB of memory for bit sets...";
+            << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
+            << " MiB of memory for bit sets...";
   std::cout.flush();
   std::vector<uint64_t> bit_set(words_per_sample * num_cols, uint64_t(-1));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
