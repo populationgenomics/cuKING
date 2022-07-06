@@ -1,10 +1,13 @@
-#include <absl/base/thread_annotations.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
-#include <absl/synchronization/blocking_counter.h>
-#include <absl/synchronization/mutex.h>
+#include <absl/status/status.h>
+#include <absl/status/statusor.h>
+#include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
 
 #include <algorithm>
 #include <iostream>
@@ -13,24 +16,29 @@
 #include <string>
 #include <vector>
 
-#include "gcs_client.h"
-#include "thread_pool.h"
+#include "utils.h"
 
-ABSL_FLAG(std::string, sample_map, "",
-          "A JSON file mapping sample IDs to cuking input paths, e.g. "
-          "gs://some/bucket/sample_map.json");
-ABSL_FLAG(std::string, output, "",
-          "The sparse matrix result JSON output path, e.g. "
-          "gs://some/bucket/relatedness.json");
+ABSL_FLAG(std::string, input_uri, "",
+          "URI containing the sample bit sets. Supports file:// as well as "
+          "gs://, e.g. gs://some/bucket/my_table.parquet");
+ABSL_FLAG(std::string, output_uri, "",
+          "The sparse relatedness matrix JSON output path. Supports file:// as "
+          "well as gs://, e.g. gs://some/bucket/relatedness.json");
 ABSL_FLAG(
     uint32_t, max_results, 100 << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
-ABSL_FLAG(int, num_reader_threads, 100,
-          "How many threads to use for parallel file reading.");
 ABSL_FLAG(
     float, king_coeff_threshold, 0.0442f,
     "Only store coefficients larger than this threshold. Defaults to 3rd "
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
+
+namespace cuking {
+
+absl::Status ToAbslStatus(const arrow::Status &status) {
+  return absl::UnknownError(status.ToString());
+}
+
+}  // namespace cuking
 
 namespace {
 
@@ -56,69 +64,11 @@ CudaArray<T> NewCudaArray(const size_t size) {
   return CudaArray<T>(buffer, CudaArrayDeleter<T>());
 }
 
-struct ReadSamplesResult {
-  uint32_t num_entries = 0;
-  CudaArray<uint64_t> bit_sets;
-};
-
-// Reads and decompresses sample data from `paths`.
-std::optional<ReadSamplesResult> ReadSamples(
-    const std::vector<std::string> &paths,
-    cuking::GcsClient *const gcs_client) {
-  cuking::ThreadPool thread_pool(absl::GetFlag(FLAGS_num_reader_threads));
-  absl::BlockingCounter blocking_counter(paths.size());
-  absl::Mutex mutex;
-  ReadSamplesResult result ABSL_GUARDED_BY(mutex);
-  std::atomic<bool> success(true);
-  for (size_t i = 0; i < paths.size(); ++i) {
-    thread_pool.Schedule([&, i] {
-      const auto &path = paths[i];
-
-      auto content = gcs_client->Read(path);
-      if (!content.ok()) {
-        std::cerr << "Error: failed to read \"" << path
-                  << "\": " << content.status() << std::endl;
-        success = false;
-        blocking_counter.DecrementCount();
-        return;
-      }
-
-      // Make sure the buffer is set and expected sizes match.
-      const size_t num_entries = content->size() / sizeof(uint64_t) / 2;
-      {
-        const absl::MutexLock lock(&mutex);
-        if (result.num_entries == 0) {
-          result.num_entries = num_entries;
-          result.bit_sets =
-              NewCudaArray<uint64_t>(num_entries * 2 * paths.size());
-        } else if (result.num_entries != num_entries) {
-          std::cerr << "Mismatch for number of entries encountered for \""
-                    << path << "\": " << num_entries << " vs "
-                    << result.num_entries << "." << std::endl;
-          success = false;
-          blocking_counter.DecrementCount();
-          return;
-        }
-      }
-
-      // Copy to the destination buffer.
-      memcpy(
-          reinterpret_cast<char *>(result.bit_sets.get() + i * 2 * num_entries),
-          content->data(), content->size());
-
-      blocking_counter.DecrementCount();
-    });
-  }
-
-  blocking_counter.Wait();
-  return success ? std::move(result) : std::optional<ReadSamplesResult>();
-}
-
-__device__ float ComputeKing(const uint32_t num_entries,
-                             const uint64_t *const het_i_entries,
+__device__ float ComputeKing(const uint64_t *const het_i_entries,
                              const uint64_t *const hom_alt_i_entries,
                              const uint64_t *const het_j_entries,
-                             const uint64_t *const hom_alt_j_entries) {
+                             const uint64_t *const hom_alt_j_entries,
+                             const uint32_t num_entries) {
   // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
   uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
   for (uint32_t k = 0; k < num_entries; ++k) {
@@ -152,23 +102,25 @@ struct KingResult {
 };
 
 __global__ void ComputeKingKernel(const uint32_t num_samples,
-                                  const uint32_t num_entries,
+                                  const uint32_t words_per_sample,
                                   const uint64_t *const bit_sets,
                                   const float coeff_threshold,
                                   const uint32_t max_results,
                                   KingResult *const results,
                                   uint32_t *const result_index) {
-  const int index = blockIdx.x * blockDim.x + threadIdx.x;
-  const int i = index / num_samples;
-  const int j = index % num_samples;
+  const uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  const uint64_t i = index / num_samples;
+  const uint64_t j = index % num_samples;
   if (i >= num_samples || i >= j) {
     return;
   }
 
-  const float coeff = ComputeKing(num_entries, bit_sets + i * 2 * num_entries,
-                                  bit_sets + (i * 2 + 1) * num_entries,
-                                  bit_sets + j * 2 * num_entries,
-                                  bit_sets + (j * 2 + 1) * num_entries);
+  const uint32_t num_entries = words_per_sample / 2;
+  const uint64_t offset_i = i * words_per_sample;
+  const uint64_t offset_j = j * words_per_sample;
+  const float coeff = ComputeKing(
+      bit_sets + offset_i, bit_sets + offset_i + num_entries,
+      bit_sets + offset_j, bit_sets + offset_j + num_entries, num_entries);
 
   if (coeff > coeff_threshold) {
     // Reserve a result slot atomically to avoid collisions.
@@ -182,87 +134,109 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
   }
 }
 
-// Returns ceil(a / b) for integers a, b.
-template <typename T>
-inline T CeilIntDiv(const T a, const T b) {
-  return (a + b - 1) / b;
-}
-
-}  // namespace
-
-int main(int argc, char **argv) {
-  absl::ParseCommandLine(argc, argv);
-
-  const auto &sample_map_file = absl::GetFlag(FLAGS_sample_map);
-  if (sample_map_file.empty()) {
-    std::cerr << "Error: no sample map file specified." << std::endl;
-    return 1;
+absl::Status Run() {
+  // Validate flags.
+  const auto input_uri = absl::GetFlag(FLAGS_input_uri);
+  if (input_uri.empty()) {
+    return absl::InvalidArgumentError("No input URI specified");
+  }
+  const auto output_uri = absl::GetFlag(FLAGS_output_uri);
+  if (output_uri.empty()) {
+    return absl::InvalidArgumentError("No output URI specified");
   }
 
-  auto gcs_client =
-      cuking::NewGcsClient(absl::GetFlag(FLAGS_num_reader_threads));
-  auto sample_map_str = gcs_client->Read(sample_map_file);
-  if (!sample_map_str.ok()) {
-    std::cerr << "Error: failed to read sample map file: "
-              << sample_map_str.status() << std::endl;
-    return 1;
+  std::cout << "Reading metadata...";
+  std::cout.flush();
+  cuking::StopWatch stop_watch;
+  std::string input_path;
+  ASSIGN_OR_RETURN(const auto input_fs,
+                   arrow::fs::FileSystemFromUri(input_uri, &input_path));
+  ASSIGN_OR_RETURN(auto metadata_file, input_fs->OpenInputFile(absl::StrCat(
+                                           input_path, "/metadata.json")));
+  ASSIGN_OR_RETURN(const uint64_t metadata_file_size, metadata_file->GetSize());
+  std::vector<uint8_t> metadata_buffer(metadata_file_size);
+  ASSIGN_OR_RETURN(
+      const uint64_t metadata_bytes_read,
+      metadata_file->ReadAt(0, metadata_file_size, metadata_buffer.data()));
+  if (metadata_bytes_read != metadata_file_size) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Expected to read ", metadata_file_size, " metadata bytes, but read ",
+        metadata_bytes_read, " bytes instead"));
   }
-
-  auto sample_map = nlohmann::json::parse(*sample_map_str);
-  sample_map_str->clear();
-  std::vector<std::string> sample_ids;
-  std::vector<std::string> sample_paths;
-  for (const auto &[id, path] : sample_map.items()) {
-    sample_ids.push_back(id);
-    sample_paths.push_back(path);
+  const auto metadata = nlohmann::json::parse(
+      metadata_buffer.begin(), metadata_buffer.end(),
+      /* parser_callback_t */ nullptr, /* allow_exceptions */ false);
+  if (metadata.is_discarded()) {
+    return absl::FailedPreconditionError("Failed to parse metadata JSON");
   }
-  sample_map.clear();
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  const size_t num_samples = sample_paths.size();
-  auto samples = ReadSamples(sample_paths, gcs_client.get());
-  if (!samples) {
-    std::cerr << "Error: failed to read samples." << std::endl;
-    return 1;
+  const std::vector<std::string_view> sample_ids = metadata["samples"];
+  const uint32_t num_samples = sample_ids.size();
+  std::cout << "Metadata contains " << num_samples << " samples with "
+            << metadata["num_sites"] << " sites." << std::endl;
+
+  std::cout << "Reading bit sets...";
+  std::cout.flush();
+  ASSIGN_OR_RETURN(auto bit_set_file, input_fs->OpenInputFile(absl::StrCat(
+                                          input_path, "/bit_sets.bin")));
+  ASSIGN_OR_RETURN(const uint64_t bit_set_file_size, bit_set_file->GetSize());
+  const uint32_t words_per_sample = metadata["words_per_sample"];
+  if (bit_set_file_size !=
+      uint64_t(num_samples) * words_per_sample * sizeof(uint64_t)) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Unexpected bit set file size: ", bit_set_file_size));
   }
+  auto bit_set =
+      NewCudaArray<uint64_t>(uint64_t(num_samples) * words_per_sample);
+  ASSIGN_OR_RETURN(const uint64_t bit_set_bytes_read,
+                   bit_set_file->ReadAt(0, bit_set_file_size, bit_set.get()));
+  if (bit_set_bytes_read != bit_set_file_size) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Expected to read ", bit_set_file_size, " bit set bytes, but read ",
+        bit_set_bytes_read, " bytes instead"));
+  }
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  std::cout << "Read " << num_samples << " samples." << std::endl;
-
+  std::cout << "Allocating memory for results...";
+  std::cout.flush();
   const uint32_t kMaxResults = absl::GetFlag(FLAGS_max_results);
   auto results = NewCudaArray<KingResult>(kMaxResults);
   memset(results.get(), 0, sizeof(KingResult) * kMaxResults);
+  // We just need a single value.
   auto result_index = NewCudaArray<uint32_t>(1);
   result_index[0] = 0;
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  const absl::Time time_before = absl::Now();
-
-  constexpr size_t kCudaBlockSize = 1024;
-  const size_t kNumCudaBlocks =
-      CeilIntDiv(num_samples * num_samples, kCudaBlockSize);
+  std::cout << "Running KING CUDA kernel...";
+  std::cout.flush();
+  constexpr uint64_t kCudaBlockSize = 1024;
+  const uint64_t kNumCudaBlocks =
+      cuking::CeilIntDiv(uint64_t(num_samples) * num_samples, kCudaBlockSize);
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
-      num_samples, samples->num_entries, samples->bit_sets.get(),
+      num_samples, words_per_sample, bit_set.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), kMaxResults, results.get(),
       result_index.get());
 
   // Wait for GPU to finish before accessing on host.
   cudaDeviceSynchronize();
-
-  const absl::Time time_after = absl::Now();
-  std::cout << "CUDA kernel time: " << (time_after - time_before) << std::endl;
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Free some memory for postprocessing.
-  samples->bit_sets.reset();
+  bit_set.reset();
 
   const uint32_t num_results = result_index[0];
   if (num_results > kMaxResults) {
-    std::cerr << "Error: could not store all results: try increasing the "
-                 "--max_results parameter."
-              << std::endl;
-    return 1;
+    return absl::ResourceExhaustedError(
+        "Could not store all results: try increasing the --max_results "
+        "parameter.");
   }
 
   std::cout << "Found " << num_results
             << " coefficients above the cut-off threshold." << std::endl;
 
+  std::cout << "Processing results...";
+  std::cout.flush();
   std::vector<bool> related(num_samples);
   for (uint32_t i = 0; i < num_results; ++i) {
     const auto &result = results[i];
@@ -276,7 +250,11 @@ int main(int argc, char **argv) {
     }
   }
 
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
   std::cout << num_related << " related samples found." << std::endl;
+
+  std::cout << "Writing output...";
+  std::cout.flush();
 
   // Create a map for JSON serialization.
   absl::flat_hash_map<std::string_view,
@@ -288,10 +266,25 @@ int main(int argc, char **argv) {
         result.coeff;
   }
 
-  if (const auto status = gcs_client->Write(absl::GetFlag(FLAGS_output),
-                                            nlohmann::json(result_map).dump(4));
-      !status.ok()) {
-    std::cerr << "Failed to write output: " << status << std::endl;
+  std::string output_path;
+  ASSIGN_OR_RETURN(const auto output_fs,
+                   arrow::fs::FileSystemFromUri(output_uri, &output_path));
+  ASSIGN_OR_RETURN(auto output_stream,
+                   output_fs->OpenOutputStream(output_path));
+  RETURN_IF_ERROR(output_stream->Write(nlohmann::json(result_map).dump(4)));
+  RETURN_IF_ERROR(output_stream->Close());
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
+
+  return absl::OkStatus();
+}
+
+}  // namespace
+
+int main(int argc, char **argv) {
+  absl::ParseCommandLine(argc, argv);
+
+  if (const auto status = Run(); !status.ok()) {
+    std::cerr << std::endl << "Error: " << status << std::endl;
     return 1;
   }
 

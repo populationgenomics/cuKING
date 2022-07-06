@@ -1,9 +1,11 @@
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <absl/status/status.h>
+#include <absl/strings/str_cat.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/result.h>
+#include <arrow/status.h>
 #include <parquet/column_reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
@@ -11,10 +13,11 @@
 #include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <queue>
+#include <thread>
 #include <vector>
 
-#include "status_macros.h"
-#include "thread_pool.h"
+#include "utils.h"
 
 ABSL_FLAG(std::string, input_uri, "",
           "URI containing Parquet table partitions. Supports file:// as well "
@@ -26,21 +29,15 @@ ABSL_FLAG(size_t, num_threads, 100,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
 
-namespace status_macros {
+namespace cuking {
 
 absl::Status ToAbslStatus(const arrow::Status& status) {
   return absl::UnknownError(status.ToString());
 }
 
-}  // namespace status_macros
+}  // namespace cuking
 
 namespace {
-
-// Returns ceil(a / b) for integers a, b.
-template <typename T>
-inline T CeilIntDiv(const T a, const T b) {
-  return (a + b - 1) / b;
-}
 
 // Atomically clears a bit in a bit set.
 inline void AtomicClearBit(uint64_t* const bit_set, uint64_t index) {
@@ -51,19 +48,85 @@ inline void AtomicClearBit(uint64_t* const bit_set, uint64_t index) {
                      __ATOMIC_RELAXED);
 }
 
-// Keeps track of time intervals.
-class StopWatch {
+// Adapted from the Abseil thread pool.
+class ThreadPool {
  public:
-  absl::Duration GetElapsedAndReset() {
-    const auto now = absl::Now();
-    const auto result = now - last_time_;
-    last_time_ = now;
-    return result;
+  explicit ThreadPool(const size_t num_threads) {
+    for (size_t i = 0; i < num_threads; ++i) {
+      threads_.push_back(std::thread(&ThreadPool::WorkLoop, this));
+    }
+  }
+
+  ThreadPool(const ThreadPool&) = delete;
+  ThreadPool& operator=(const ThreadPool&) = delete;
+
+  ~ThreadPool() {
+    {
+      absl::MutexLock l(&mu_);
+      for (size_t i = 0; i < threads_.size(); i++) {
+        queue_.push(nullptr);  // Shutdown signal.
+      }
+    }
+    for (auto& t : threads_) {
+      t.join();
+    }
+  }
+
+  // Schedule a function to be run on a ThreadPool thread immediately.
+  void Schedule(std::function<void()> func) {
+    assert(func != nullptr);
+    absl::MutexLock l(&mu_);
+    queue_.push(std::move(func));
   }
 
  private:
-  absl::Time last_time_ = absl::Now();
+  bool WorkAvailable() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+    return !queue_.empty();
+  }
+
+  void WorkLoop() {
+    while (true) {
+      std::function<void()> func;
+      {
+        absl::MutexLock l(&mu_);
+        mu_.Await(absl::Condition(this, &ThreadPool::WorkAvailable));
+        func = std::move(queue_.front());
+        queue_.pop();
+      }
+      if (func == nullptr) {  // Shutdown signal.
+        break;
+      }
+      func();
+    }
+  }
+
+  absl::Mutex mu_;
+  std::queue<std::function<void()>> queue_ ABSL_GUARDED_BY(mu_);
+  std::vector<std::thread> threads_;
 };
+
+// Invokes the given function in parallel over a range. If any invocations
+// returns an error, only one such error will be returned
+// (non-deterministically).
+absl::Status ParallelFor(ThreadPool* const thread_pool, const size_t begin,
+                         const size_t end,
+                         std::function<absl::Status(size_t index)> func) {
+  absl::BlockingCounter blocking_counter(end - begin);
+  absl::Mutex mu;
+  absl::Status result ABSL_GUARDED_BY(mu);
+  for (size_t i = begin; i < end; ++i) {
+    thread_pool->Schedule([&, i] {
+      auto status = func(i);
+      if (!status.ok()) {
+        const absl::MutexLock lock(&mu);
+        result.Update(std::move(status));
+      }
+      blocking_counter.DecrementCount();
+    });
+  }
+  blocking_counter.Wait();
+  return result;
+}
 
 absl::Status Run() {
   // Validate flags.
@@ -83,7 +146,7 @@ absl::Status Run() {
   // Initialize the input dataset.
   std::cout << "Listing input files...";
   std::cout.flush();
-  StopWatch stop_watch;
+  cuking::StopWatch stop_watch;
   std::string input_path;
   ASSIGN_OR_RETURN(const auto input_fs,
                    arrow::fs::FileSystemFromUri(input_uri, &input_path));
@@ -113,10 +176,10 @@ absl::Status Run() {
   std::cout.flush();
   std::vector<std::shared_ptr<parquet::FileMetaData>> file_metadata(
       file_infos.size());
-  cuking::ThreadPool thread_pool(num_threads);
+  ThreadPool thread_pool(num_threads);
   std::atomic<size_t> num_processed(0);
-  RETURN_IF_ERROR(cuking::ParallelFor(
-      &thread_pool, 0, file_infos.size(), [&](const size_t i) {
+  RETURN_IF_ERROR(
+      ParallelFor(&thread_pool, 0, file_infos.size(), [&](const size_t i) {
         ASSIGN_OR_RETURN(auto input_file,
                          input_fs->OpenInputFile(file_infos[i]));
         file_metadata[i] = parquet::ReadMetaData(input_file);
@@ -148,10 +211,11 @@ absl::Status Run() {
   // sample), in distinct bit sets. We initialize all bits to 1 as that
   // indicates a missing value (i.e. is_het and is_hom_var are both set). That's
   // why below we only ever have to clear bits (AtomicClearBit).
-  const size_t words_per_sample = 2 * CeilIntDiv(num_rows, size_t(64));
+  const size_t words_per_sample = 2 * cuking::CeilIntDiv(num_rows, size_t(64));
   const size_t bit_set_size = words_per_sample * num_cols;
   std::cout << "Allocating "
-            << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
+            << cuking::CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1)
+                                                                       << 20)
             << " MiB of memory for bit sets...";
   std::cout.flush();
   std::vector<uint64_t> bit_set(words_per_sample * num_cols, uint64_t(-1));
@@ -161,8 +225,8 @@ absl::Status Run() {
   std::cout << "Processing partitions...";
   std::cout.flush();
   num_processed = 0;
-  RETURN_IF_ERROR(cuking::ParallelFor(
-      &thread_pool, 0, file_infos.size(), [&](const size_t i) {
+  RETURN_IF_ERROR(
+      ParallelFor(&thread_pool, 0, file_infos.size(), [&](const size_t i) {
         const auto& metadata = file_metadata[i];
         if (size_t(metadata->num_columns()) != num_cols) {
           return absl::FailedPreconditionError(absl::StrCat(
