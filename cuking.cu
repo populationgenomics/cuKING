@@ -179,7 +179,7 @@ absl::Status Run() {
   std::cout << "Reading bit sets...";
   std::cout.flush();
   ASSIGN_OR_RETURN(auto bit_set_file, input_fs->OpenInputFile(absl::StrCat(
-                                          input_path, "/bit_sets.bin")));
+                                          input_path, "/bit_set.bin")));
   ASSIGN_OR_RETURN(const uint64_t bit_set_file_size, bit_set_file->GetSize());
   const uint32_t words_per_sample = metadata["words_per_sample"];
   if (bit_set_file_size !=
