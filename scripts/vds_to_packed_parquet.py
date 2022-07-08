@@ -65,7 +65,7 @@ def main(input, sites, output):
     entries = entries.select(entries.row_idx, entries.n_alt_alleles)
 
     # Export to one Parquet file per partition.
-    ht.to_spark().write.parquet(output)
+    entries.to_spark().write.parquet(output)
 
 
 if __name__ == "__main__":
