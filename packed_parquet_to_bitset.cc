@@ -1,9 +1,11 @@
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <absl/status/status.h>
+#include <absl/status/statusor.h>
 #include <absl/strings/str_cat.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/io/memory.h>
 #include <arrow/result.h>
 #include <arrow/status.h>
 #include <parquet/column_reader.h>
@@ -128,6 +130,21 @@ absl::Status ParallelFor(ThreadPool* const thread_pool, const size_t begin,
   return result;
 }
 
+absl::StatusOr<std::vector<uint8_t>> ReadFile(
+    arrow::fs::FileSystem* const file_system,
+    const arrow::fs::FileInfo& file_info) {
+  ASSIGN_OR_RETURN(auto file, file_system->OpenInputFile(file_info));
+  const auto size = file_info.size();
+  std::vector<uint8_t> buffer(size);
+  ASSIGN_OR_RETURN(const auto bytes_read, file->ReadAt(0, size, buffer.data()));
+  if (bytes_read != size) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Expected to read ", size, " bytes, but got ", bytes_read,
+                     " bytes instead"));
+  }
+  return std::move(buffer);
+}
+
 absl::Status Run() {
   // Validate flags.
   const auto input_uri = absl::GetFlag(FLAGS_input_uri);
@@ -180,9 +197,15 @@ absl::Status Run() {
   std::atomic<size_t> num_processed(0);
   RETURN_IF_ERROR(
       ParallelFor(&thread_pool, 0, file_infos.size(), [&](const size_t i) {
-        ASSIGN_OR_RETURN(auto input_file,
-                         input_fs->OpenInputFile(file_infos[i]));
-        file_metadata[i] = parquet::ReadMetaData(input_file);
+        // Reading the entire file is significantly faster than using a standard
+        // RandomAccessFile on GCS, probably due to less roundtrips.
+        ASSIGN_OR_RETURN(auto file_buffer,
+                         ReadFile(input_fs.get(), file_infos[i]));
+        auto buffer_reader = std::make_shared<arrow::io::BufferReader>(
+            file_buffer.data(), file_buffer.size());
+        auto file_reader =
+            parquet::ParquetFileReader::Open(std::move(buffer_reader));
+        file_metadata[i] = file_reader->metadata();
         if ((++num_processed & ((size_t(1) << 10) - 1)) == 0) {
           std::cout << ".";  // Progress indicator.
           std::cout.flush();
@@ -234,10 +257,14 @@ absl::Status Run() {
               metadata->num_columns(), " in ", file_infos[i].path()));
         }
 
-        ASSIGN_OR_RETURN(auto input_file,
-                         input_fs->OpenInputFile(file_infos[i]));
+        // Reading the entire file is significantly faster than using a standard
+        // RandomAccessFile on GCS, probably due to less roundtrips.
+        ASSIGN_OR_RETURN(auto file_buffer,
+                         ReadFile(input_fs.get(), file_infos[i]));
+        auto buffer_reader = std::make_shared<arrow::io::BufferReader>(
+            file_buffer.data(), file_buffer.size());
         auto file_reader = parquet::ParquetFileReader::Open(
-            std::move(input_file), parquet::default_reader_properties(),
+            std::move(buffer_reader), parquet::default_reader_properties(),
             metadata);
 
         static constexpr size_t kBatchBufferSize = 1024;

@@ -24,6 +24,7 @@ target_link_libraries(packed_parquet_to_bitset PRIVATE
     absl::flags
     absl::flags_parse
     absl::status
+    absl::statusor
     arrow_shared
     nlohmann_json::nlohmann_json
     parquet
