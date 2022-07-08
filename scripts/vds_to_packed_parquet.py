@@ -15,10 +15,6 @@ import click
 from gnomad.utils.annotations import annotate_adj
 import hail as hl
 
-# str.removesuffix is only available in Python >= 3.9.
-def remove_suffix(s: str, suffix: str) -> str:
-    return s[:-len(suffix)] if s.endswith(suffix) else s
-
 @click.command()
 @click.option("--input", help="Input path for VDS", required=True)
 @click.option("--sites", help="Sites table path for row filtering", required=True)
@@ -55,22 +51,18 @@ def main(input, sites, output):
     mt = annotate_adj(mt)
     mt = mt.filter_entries(mt.adj)
 
-    # Compute two-bit representation of fields necessary for KING: hom-ref (0), het (1), hom-var (2), missing (3).
-    mt = mt.unfilter_entries()
-    mt = mt.select_entries(
-        packed_gt=hl.if_else(hl.is_defined(mt.GT), mt.GT.n_alt_alleles(), 3)
-    )
+    # Compute the field required for KING.
+    mt = mt.select_entries(n_alt_alleles=mt.GT.n_alt_alleles())
 
-    # Create a table based on entries alone.
+    # Create a table based on entries alone. By adding a row index, we can drop the
+    # locus and alleles and avoid writing missing entries.
+    mt = mt.select_globals()
     mt = mt.select_rows()
-    ht = mt.make_table()
-
-    # Remove locus and alleles key, as we only need a row index.
-    ht = ht.key_by()
-    ht = ht.drop(ht.locus, ht.alleles)
-
-    # Remove the ".packed_gt" suffix from the column names.
-    ht = ht.rename({s : remove_suffix(s, '.packed_gt') for s in ht.row})
+    mt = mt.select_cols()
+    mt = mt.add_row_index()
+    entries = mt.entries()
+    entries = entries.key_by(entries.s)
+    entries = entries.select(entries.row_idx, entries.n_alt_alleles)
 
     # Export to one Parquet file per partition.
     ht.to_spark().write.parquet(output)
