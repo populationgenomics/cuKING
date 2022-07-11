@@ -113,12 +113,7 @@ RUN cd /deps && \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DARROW_BUILD_STATIC=OFF \
-        -DARROW_FILESYSTEM=ON \
-        -DARROW_GCS=ON \
         -DARROW_PARQUET=ON \
-        -DARROW_WITH_LZ4=ON \
-        -DARROW_WITH_SNAPPY=ON \
-        -DARROW_WITH_ZLIB=ON \
         -DARROW_WITH_ZSTD=ON && \
     cmake --build . --target install -- -j 16 && \
     ldconfig
