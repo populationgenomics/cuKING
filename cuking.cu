@@ -3,14 +3,16 @@
 #include <absl/flags/parse.h>
 #include <absl/status/status.h>
 #include <absl/status/statusor.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 #include <absl/synchronization/blocking_counter.h>
 #include <absl/time/time.h>
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/result.h>
-#include <arrow/status.h>
+#include <arrow/io/memory.h>
 #include <google/cloud/storage/client.h>
+#include <parquet/column_reader.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
 
 #include <algorithm>
 #include <iostream>
@@ -42,39 +44,19 @@ namespace {
 
 namespace gcs = google::cloud::storage;
 
-// Returns ceil(a / b) for integers a, b.
-template <typename T>
-inline T CeilIntDiv(const T a, const T b) {
-  return (a + b - 1) / b;
-}
-
-// Keeps track of time intervals.
-class StopWatch {
- public:
-  absl::Duration GetElapsedAndReset() {
-    const auto now = absl::Now();
-    const auto result = now - last_time_;
-    last_time_ = now;
-    return result;
-  }
-
- private:
-  absl::Time last_time_ = absl::Now();
-};
-
 inline absl::Status ToAbslStatus(absl::Status status) {
   return std::move(status);
 }
 
-inline absl::Status ToAbslStatus(const arrow::Status &status) {
-  return absl::UnknownError(status.ToString());
+inline absl::Status ToAbslStatus(const google::cloud::Status &status) {
+  return absl::UnknownError(status.message());
 }
 
 // Unfortunately these status macros are still not part of Abseil. This is
 // adapted from
 // https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/missive/util/status_macros.h
-// but allows converting from different Status implementations
-// (e.g. absl::Status and arrow::Status) by providing an override for the
+// but allows converting from different Status implementations (e.g.
+// absl::Status and google::cloud::Status) by providing an override for the
 // ToAbslStatus converter.
 #define RETURN_IF_ERROR(expr)                                                \
   do {                                                                       \
@@ -194,6 +176,35 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
   }
 }
 
+// Atomically clears a bit in a bit set.
+inline void AtomicClearBit(uint64_t *const bit_set, uint64_t index) {
+  uint64_t *const ptr = bit_set + (index >> 6);
+  // C++20 adds std::atomic_ref, but we're compiling with C++17. We can use
+  // relaxed memory ordering as bit set values don't depend on one another.
+  __atomic_and_fetch(ptr, ~(uint64_t(1) << (index & size_t(63))),
+                     __ATOMIC_RELAXED);
+}
+
+// Returns ceil(a / b) for integers a, b.
+template <typename T>
+inline T CeilIntDiv(const T a, const T b) {
+  return (a + b - 1) / b;
+}
+
+// Keeps track of time intervals.
+class StopWatch {
+ public:
+  absl::Duration GetElapsedAndReset() {
+    const auto now = absl::Now();
+    const auto result = now - last_time_;
+    last_time_ = now;
+    return result;
+  }
+
+ private:
+  absl::Time last_time_ = absl::Now();
+};
+
 // Returns the bucket + blob name from a full gs:// URI.
 absl::StatusOr<std::pair<std::string_view, std::string_view>> SplitGcsUri(
     std::string_view uri) {
@@ -208,15 +219,6 @@ absl::StatusOr<std::pair<std::string_view, std::string_view>> SplitGcsUri(
   }
 
   return std::make_pair(uri.substr(0, slash_pos), uri.substr(slash_pos + 1));
-}
-
-// Atomically clears a bit in a bit set.
-inline void AtomicClearBit(uint64_t *const bit_set, uint64_t index) {
-  uint64_t *const ptr = bit_set + (index >> 6);
-  // C++20 adds std::atomic_ref, but we're compiling with C++17. We can use
-  // relaxed memory ordering as bit set values don't depend on one another.
-  __atomic_and_fetch(ptr, ~(uint64_t(1) << (index & size_t(63))),
-                     __ATOMIC_RELAXED);
 }
 
 // Adapted from the Abseil thread pool.
@@ -305,75 +307,191 @@ absl::Status Run() {
   if (input_uri.empty()) {
     return absl::InvalidArgumentError("No input URI specified");
   }
+  ASSIGN_OR_RETURN(const auto input_bucket_and_path, SplitGcsUri(input_uri));
+
   const auto output_uri = absl::GetFlag(FLAGS_output_uri);
   if (output_uri.empty()) {
     return absl::InvalidArgumentError("No output URI specified");
   }
+  ASSIGN_OR_RETURN(const auto output_bucket_and_path, SplitGcsUri(output_uri));
+
   const auto num_reader_threads = absl::GetFlag(FLAGS_num_reader_threads);
   if (num_reader_threads == 0) {
     return absl::InvalidArgumentError("Invalid number of reader threads");
   }
 
+  StopWatch stop_watch;
+  std::cout << "Reading metadata...";
+  std::cout.flush();
+  const auto input_bucket = std::string(input_bucket_and_path.first);
+  const auto input_path = std::string(input_bucket_and_path.second);
   auto gcs_client =
       gcs::Client(google::cloud::Options{}.set<gcs::ConnectionPoolSizeOption>(
           num_reader_threads));
-
-  // Find all Parquet table files.
-  StopWatch stop_watch;
-  std::cout << "Listing input files...";
-  std::cout.flush();
-  ASSIGN_OR_RETURN(auto bucket_and_path, SplitGcsUri(input_uri));
-
-  std::cout << "Reading metadata...";
-  std::cout.flush();
-  std::string input_path;
-  ASSIGN_OR_RETURN(const auto input_fs,
-                   arrow::fs::FileSystemFromUri(input_uri, &input_path));
-  ASSIGN_OR_RETURN(auto metadata_file, input_fs->OpenInputFile(absl::StrCat(
-                                           input_path, "/metadata.json")));
-  ASSIGN_OR_RETURN(const uint64_t metadata_file_size, metadata_file->GetSize());
-  std::vector<uint8_t> metadata_buffer(metadata_file_size);
-  ASSIGN_OR_RETURN(
-      const uint64_t metadata_bytes_read,
-      metadata_file->ReadAt(0, metadata_file_size, metadata_buffer.data()));
-  if (metadata_bytes_read != metadata_file_size) {
+  auto metadata_stream = gcs_client.ReadObject(
+      input_bucket, absl::StrCat(input_path, "/metadata.json"));
+  if (metadata_stream.bad()) {
     return absl::FailedPreconditionError(absl::StrCat(
-        "Expected to read ", metadata_file_size, " metadata bytes, but got ",
-        metadata_bytes_read, " bytes instead"));
+        "Failed to read metadata: ", metadata_stream.status().message()));
   }
-  const auto metadata = nlohmann::json::parse(
-      metadata_buffer.begin(), metadata_buffer.end(),
-      /* parser_callback_t */ nullptr, /* allow_exceptions */ false);
+  nlohmann::json metadata;
+  metadata_stream >> metadata;
+  metadata_stream.Close();
   if (metadata.is_discarded()) {
     return absl::FailedPreconditionError("Failed to parse metadata JSON");
   }
+  const auto &metadata_samples = metadata["samples"];
+  const uint32_t num_samples = metadata_samples.size();
+  std::vector<std::string> sample_ids;
+  sample_ids.reserve(num_samples);
+  for (const auto &sample_id : metadata_samples) {
+    sample_ids.push_back(sample_id);
+  }
+  const size_t num_sites = metadata["num_sites"];
+  metadata.clear();
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  const std::vector<std::string_view> sample_ids = metadata["samples"];
-  const uint32_t num_samples = sample_ids.size();
-  std::cout << "Metadata contains " << num_samples << " samples with "
-            << metadata["num_sites"] << " sites." << std::endl;
-
-  std::cout << "Reading bit sets...";
+  // Allocate the memory required for the bit sets. To tranpose the Hail
+  // MatrixTable, we concatenate each sample's genotypes across all partitions,
+  // storing the results sequentially in a bit set. Each sample gets its own set
+  // of words in the bit set, to facilitate comparing any two samples. Each
+  // genotype is split into two bits (is_het followed by is_hom_var for each
+  // sample), in distinct bit sets.
+  const size_t words_per_sample = 2 * CeilIntDiv(num_sites, size_t(64));
+  const size_t bit_set_size = words_per_sample * num_sites;
+  std::cout << "Allocating "
+            << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
+            << " MiB of memory for bit set...";
   std::cout.flush();
-  ASSIGN_OR_RETURN(auto bit_set_file, input_fs->OpenInputFile(absl::StrCat(
-                                          input_path, "/bit_set.bin")));
-  ASSIGN_OR_RETURN(const uint64_t bit_set_file_size, bit_set_file->GetSize());
-  const uint32_t words_per_sample = metadata["words_per_sample"];
-  if (bit_set_file_size !=
-      uint64_t(num_samples) * words_per_sample * sizeof(uint64_t)) {
-    return absl::FailedPreconditionError(
-        absl::StrCat("Unexpected bit set file size: ", bit_set_file_size));
+  auto bit_set = NewCudaArray<uint64_t>(bit_set_size);
+  // We initialize all bits to 1 as that indicates a missing value (i.e. is_het
+  // and is_hom_var are both set). That's why below we only ever have to clear
+  // bits (AtomicClearBit).
+  memset(bit_set.get(), 0xFF, bit_set_size * sizeof(uint64_t));
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
+
+  // Find all Parquet table files.
+  std::cout << "Listing input files...";
+  std::cout.flush();
+  std::vector<std::pair<std::string, size_t>> input_files;
+  for (const auto &blob_metadata_or_status :
+       gcs_client.ListObjects(input_bucket, gcs::Prefix(input_path))) {
+    ASSIGN_OR_RETURN(const auto &blob_metadata, blob_metadata_or_status);
+    if (!absl::EndsWith(blob_metadata.name(), ".parquet")) {
+      continue;  // Skip files that are not Parquet tables.
+    }
+    input_files.emplace_back(blob_metadata.name(), blob_metadata.size());
   }
-  auto bit_set =
-      NewCudaArray<uint64_t>(uint64_t(num_samples) * words_per_sample);
-  ASSIGN_OR_RETURN(const uint64_t bit_set_bytes_read,
-                   bit_set_file->ReadAt(0, bit_set_file_size, bit_set.get()));
-  if (bit_set_bytes_read != bit_set_file_size) {
-    return absl::FailedPreconditionError(absl::StrCat(
-        "Expected to read ", bit_set_file_size, " bit set bytes, but got ",
-        bit_set_bytes_read, " bytes instead"));
-  }
+  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
+  std::cout << "Found " << input_files.size() << " input files." << std::endl;
+
+  // Read Parquet tables in parallel, populating the bit set.
+  std::cout << "Processing Parquet tables...";
+  std::cout.flush();
+  ThreadPool thread_pool(num_reader_threads);
+  std::atomic<size_t> num_processed(0);
+  RETURN_IF_ERROR(
+      ParallelFor(&thread_pool, 0, input_files.size(), [&](const size_t i) {
+        // Make a copy of the GCS client for thread-safety.
+        gcs::Client gcs_client_copy = gcs_client;
+        const auto &input_file = input_files[i];
+        auto input_stream =
+            gcs_client_copy.ReadObject(input_bucket, input_file.first);
+        if (input_stream.bad()) {
+          return absl::FailedPreconditionError(
+              absl::StrCat("Failed to read ", input_files[i].first, ": ",
+                           input_stream.status().message()));
+        }
+        // Read the entire file into memory, to save roundtrips to GCS.
+        std::vector<char> file_buffer(input_file.second);
+        input_stream.read(file_buffer.data(), file_buffer.size());
+        if (input_stream.bad()) {
+          return absl::FailedPreconditionError(
+              absl::StrCat("Failed to read ", input_file.first, ": ",
+                           input_stream.status().message()));
+        }
+        input_stream.Close();
+
+        auto file_reader = parquet::ParquetFileReader::Open(
+            std::make_shared<arrow::io::BufferReader>(
+                reinterpret_cast<const uint8_t *>(file_buffer.data()),
+                file_buffer.size()));
+        const auto file_metadata = file_reader->metadata();
+        constexpr size_t kNumColumns = 3;
+        if (file_metadata->num_columns() != kNumColumns) {
+          return absl::FailedPreconditionError(absl::StrCat(
+              "Expected ", kNumColumns, " columns, found ",
+              file_metadata->num_columns(), " in ", input_file.first));
+        }
+
+        // Read all columns fully into memory, this way it's easier to process a
+        // full row afterwards.
+        const size_t num_rows = file_metadata->num_rows();
+        std::vector<int32_t> columns[kNumColumns];
+        size_t rows_read[kNumColumns];
+        for (size_t column = 0; column < kNumColumns; ++column) {
+          columns[column].resize(num_rows);
+          rows_read[column] = 0;
+        }
+        const size_t num_row_groups = file_metadata->num_row_groups();
+        for (size_t row_group = 0; row_group < num_row_groups; ++row_group) {
+          auto row_group_reader = file_reader->RowGroup(row_group);
+          for (size_t column = 0; column < kNumColumns; ++column) {
+            auto column_reader = row_group_reader->Column(column);
+            if (column_reader->type() != parquet::Type::INT32) {
+              return absl::FailedPreconditionError(
+                  absl::StrCat("Expected INT32 type, found ",
+                               parquet::TypeToString(column_reader->type()),
+                               " in ", input_file.first));
+            }
+            parquet::Int32Reader *const int32_reader =
+                static_cast<parquet::Int32Reader *>(column_reader.get());
+            while (int32_reader->HasNext()) {
+              // We can set def_levels and rep_levels to nullptr, as there are
+              // no undefined values.
+              int64_t values_read = 0;
+              int32_reader->ReadBatch(
+                  num_rows - rows_read[column], /* def_levels */ nullptr,
+                  /* rep_levels */ nullptr,
+                  columns[column].data() + rows_read[column], &values_read);
+              rows_read[column] += values_read;
+            }
+          }
+        }
+
+        // Update the bit set now that the whole table is in memory.
+        for (size_t row = 0; row < num_rows; ++row) {
+          const int32_t row_idx = columns[0][row];
+          const int32_t col_idx = columns[1][row];
+          const int32_t n_alt_alleles = columns[2][row];
+          // Pointers to the beginning of the bit set for this sample.
+          uint64_t *const is_het_ptr =
+              bit_set.get() + col_idx * words_per_sample;
+          uint64_t *const is_hom_var_ptr = is_het_ptr + words_per_sample / 2;
+          switch (n_alt_alleles) {
+            case 0:  // hom-ref
+              AtomicClearBit(is_het_ptr, row_idx);
+              AtomicClearBit(is_hom_var_ptr, row_idx);
+              break;
+            case 1:  // het
+              AtomicClearBit(is_hom_var_ptr, row_idx);
+              break;
+            case 2:  // hom-var
+              AtomicClearBit(is_het_ptr, row_idx);
+              break;
+            default:
+              return absl::FailedPreconditionError(absl::StrCat(
+                  "Invalid value for n_alt_alleles (", n_alt_alleles,
+                  ") encountered in ", input_file.first));
+          }
+        }
+
+        if ((++num_processed & ((size_t(1) << 10) - 1)) == 0) {
+          std::cout << ".";  // Progress indicator.
+          std::cout.flush();
+        }
+        return absl::OkStatus();
+      }));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   std::cout << "Allocating memory for results...";
@@ -386,7 +504,7 @@ absl::Status Run() {
   result_index[0] = 0;
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  std::cout << "Running KING CUDA kernel...";
+  std::cout << "Running KING CUDA kernel for " << num_samples << " samples...";
   std::cout.flush();
   constexpr uint64_t kCudaBlockSize = 1024;
   const uint64_t kNumCudaBlocks =
@@ -415,25 +533,8 @@ absl::Status Run() {
 
   std::cout << "Processing results...";
   std::cout.flush();
-  std::vector<bool> related(num_samples);
-  for (uint32_t i = 0; i < num_results; ++i) {
-    const auto &result = results[i];
-    related[result.sample_i] = related[result.sample_j] = true;
-  }
-
-  uint32_t num_related = 0;
-  for (size_t i = 0; i < num_samples; ++i) {
-    if (related[i]) {
-      ++num_related;
-    }
-  }
-
-  std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
-  std::cout << num_related << " related samples found." << std::endl;
-
-  std::cout << "Writing output...";
-  std::cout.flush();
-
+  // Free some memory for result serialization.
+  bit_set.reset();
   // Create a map for JSON serialization.
   absl::flat_hash_map<std::string_view,
                       absl::flat_hash_map<std::string_view, float>>
@@ -444,14 +545,15 @@ absl::Status Run() {
         result.coeff;
   }
 
-  std::string output_path;
-  ASSIGN_OR_RETURN(const auto output_fs,
-                   arrow::fs::FileSystemFromUri(output_uri, &output_path));
-  ASSIGN_OR_RETURN(auto output_stream,
-                   output_fs->OpenOutputStream(output_path));
-  RETURN_IF_ERROR(output_stream->Write(nlohmann::json(result_map).dump(4)));
-  RETURN_IF_ERROR(output_stream->Close());
+  ASSIGN_OR_RETURN(
+      const auto output_metadata,
+      gcs_client.InsertObject(std::string(output_bucket_and_path.first),
+                              std::string(output_bucket_and_path.second),
+                              nlohmann::json(result_map).dump()));
+
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
+  std::cout << "Wrote " << num_results << " results (" << output_metadata.size()
+            << " bytes)." << std::endl;
 
   return absl::OkStatus();
 }

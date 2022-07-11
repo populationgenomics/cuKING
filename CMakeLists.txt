@@ -23,6 +23,9 @@ target_link_libraries(cuking PRIVATE
     absl::flags
     absl::flags_parse
     absl::status
+    absl::statusor
     arrow_shared
+    google-cloud-cpp::storage
     nlohmann_json::nlohmann_json
+    parquet
 )
