@@ -2,27 +2,34 @@
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <absl/status/status.h>
+#include <absl/status/statusor.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/strip.h>
+#include <absl/synchronization/blocking_counter.h>
 #include <absl/time/time.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/result.h>
 #include <arrow/status.h>
+#include <google/cloud/storage/client.h>
 
 #include <algorithm>
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include "utils.h"
-
 ABSL_FLAG(std::string, input_uri, "",
-          "URI containing the sample bit sets. Supports file:// as well as "
-          "gs://, e.g. gs://some/bucket/my_table.parquet");
+          "GCS URI containing the packed Parquet tables, e.g. "
+          "gs://some/bucket/my_table.parquet");
 ABSL_FLAG(std::string, output_uri, "",
-          "The sparse relatedness matrix JSON output path. Supports file:// as "
-          "well as gs://, e.g. gs://some/bucket/relatedness.json");
+          "The sparse relatedness matrix JSON output GCS URI, e.g. "
+          "gs://some/bucket/relatedness.json");
+ABSL_FLAG(size_t, num_reader_threads, 100,
+          "How many threads to use for processing of Parquet partitions. This "
+          "influences the amount of memory required.");
 ABSL_FLAG(
     uint32_t, max_results, 100 << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
@@ -31,15 +38,67 @@ ABSL_FLAG(
     "Only store coefficients larger than this threshold. Defaults to 3rd "
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
 
-namespace cuking {
+namespace {
 
-absl::Status ToAbslStatus(const arrow::Status &status) {
+namespace gcs = google::cloud::storage;
+
+// Returns ceil(a / b) for integers a, b.
+template <typename T>
+inline T CeilIntDiv(const T a, const T b) {
+  return (a + b - 1) / b;
+}
+
+// Keeps track of time intervals.
+class StopWatch {
+ public:
+  absl::Duration GetElapsedAndReset() {
+    const auto now = absl::Now();
+    const auto result = now - last_time_;
+    last_time_ = now;
+    return result;
+  }
+
+ private:
+  absl::Time last_time_ = absl::Now();
+};
+
+inline absl::Status ToAbslStatus(absl::Status status) {
+  return std::move(status);
+}
+
+inline absl::Status ToAbslStatus(const arrow::Status &status) {
   return absl::UnknownError(status.ToString());
 }
 
-}  // namespace cuking
+// Unfortunately these status macros are still not part of Abseil. This is
+// adapted from
+// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/main:src/platform2/missive/util/status_macros.h
+// but allows converting from different Status implementations
+// (e.g. absl::Status and arrow::Status) by providing an override for the
+// ToAbslStatus converter.
+#define RETURN_IF_ERROR(expr)                                                \
+  do {                                                                       \
+    /* Using _status below to avoid capture problems if expr is "status". */ \
+    const auto _status = (expr);                                             \
+    if (ABSL_PREDICT_FALSE(!_status.ok())) {                                 \
+      return ToAbslStatus(_status);                                          \
+    }                                                                        \
+  } while (0)
 
-namespace {
+// Internal helper for concatenating macro values.
+#define STATUS_MACROS_CONCAT_NAME_INNER(x, y) x##y
+#define STATUS_MACROS_CONCAT_NAME(x, y) STATUS_MACROS_CONCAT_NAME_INNER(x, y)
+
+#define ASSIGN_OR_RETURN_IMPL(result, lhs, rexpr) \
+  auto result = rexpr;                            \
+  if (ABSL_PREDICT_FALSE(!result.ok())) {         \
+    return ToAbslStatus(result.status());         \
+  }                                               \
+  lhs = *std::move(result);
+
+#define ASSIGN_OR_RETURN(lhs, rexpr) \
+  ASSIGN_OR_RETURN_IMPL(             \
+      STATUS_MACROS_CONCAT_NAME(_status_or_value, __COUNTER__), lhs, rexpr)
 
 // Custom deleter for RAII-style CUDA-managed array.
 template <typename T>
@@ -135,6 +194,111 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
   }
 }
 
+// Returns the bucket + blob name from a full gs:// URI.
+absl::StatusOr<std::pair<std::string_view, std::string_view>> SplitGcsUri(
+    std::string_view uri) {
+  if (!absl::ConsumePrefix(&uri, "gs://")) {
+    return absl::InvalidArgumentError(absl::StrCat("Unsupported URI: ", uri));
+  }
+
+  const size_t slash_pos = uri.find_first_of('/');
+  if (slash_pos == std::string_view::npos) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Incomplete blob URI ", uri));
+  }
+
+  return std::make_pair(uri.substr(0, slash_pos), uri.substr(slash_pos + 1));
+}
+
+// Atomically clears a bit in a bit set.
+inline void AtomicClearBit(uint64_t *const bit_set, uint64_t index) {
+  uint64_t *const ptr = bit_set + (index >> 6);
+  // C++20 adds std::atomic_ref, but we're compiling with C++17. We can use
+  // relaxed memory ordering as bit set values don't depend on one another.
+  __atomic_and_fetch(ptr, ~(uint64_t(1) << (index & size_t(63))),
+                     __ATOMIC_RELAXED);
+}
+
+// Adapted from the Abseil thread pool.
+class ThreadPool {
+ public:
+  explicit ThreadPool(const size_t num_threads) {
+    for (size_t i = 0; i < num_threads; ++i) {
+      threads_.push_back(std::thread(&ThreadPool::WorkLoop, this));
+    }
+  }
+
+  ThreadPool(const ThreadPool &) = delete;
+  ThreadPool &operator=(const ThreadPool &) = delete;
+
+  ~ThreadPool() {
+    {
+      absl::MutexLock l(&mu_);
+      for (size_t i = 0; i < threads_.size(); i++) {
+        queue_.push(nullptr);  // Shutdown signal.
+      }
+    }
+    for (auto &t : threads_) {
+      t.join();
+    }
+  }
+
+  // Schedule a function to be run on a ThreadPool thread immediately.
+  void Schedule(std::function<void()> func) {
+    assert(func != nullptr);
+    absl::MutexLock l(&mu_);
+    queue_.push(std::move(func));
+  }
+
+ private:
+  bool WorkAvailable() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+    return !queue_.empty();
+  }
+
+  void WorkLoop() {
+    while (true) {
+      std::function<void()> func;
+      {
+        absl::MutexLock l(&mu_);
+        mu_.Await(absl::Condition(this, &ThreadPool::WorkAvailable));
+        func = std::move(queue_.front());
+        queue_.pop();
+      }
+      if (func == nullptr) {  // Shutdown signal.
+        break;
+      }
+      func();
+    }
+  }
+
+  absl::Mutex mu_;
+  std::queue<std::function<void()>> queue_ ABSL_GUARDED_BY(mu_);
+  std::vector<std::thread> threads_;
+};
+
+// Invokes the given function in parallel over a range. If any invocations
+// returns an error, only one such error will be returned
+// (non-deterministically).
+absl::Status ParallelFor(ThreadPool *const thread_pool, const size_t begin,
+                         const size_t end,
+                         std::function<absl::Status(size_t index)> func) {
+  absl::BlockingCounter blocking_counter(end - begin);
+  absl::Mutex mu;
+  absl::Status result ABSL_GUARDED_BY(mu);
+  for (size_t i = begin; i < end; ++i) {
+    thread_pool->Schedule([&, i] {
+      auto status = func(i);
+      if (!status.ok()) {
+        const absl::MutexLock lock(&mu);
+        result.Update(std::move(status));
+      }
+      blocking_counter.DecrementCount();
+    });
+  }
+  blocking_counter.Wait();
+  return result;
+}
+
 absl::Status Run() {
   // Validate flags.
   const auto input_uri = absl::GetFlag(FLAGS_input_uri);
@@ -145,10 +309,23 @@ absl::Status Run() {
   if (output_uri.empty()) {
     return absl::InvalidArgumentError("No output URI specified");
   }
+  const auto num_reader_threads = absl::GetFlag(FLAGS_num_reader_threads);
+  if (num_reader_threads == 0) {
+    return absl::InvalidArgumentError("Invalid number of reader threads");
+  }
+
+  auto gcs_client =
+      gcs::Client(google::cloud::Options{}.set<gcs::ConnectionPoolSizeOption>(
+          num_reader_threads));
+
+  // Find all Parquet table files.
+  StopWatch stop_watch;
+  std::cout << "Listing input files...";
+  std::cout.flush();
+  ASSIGN_OR_RETURN(auto bucket_and_path, SplitGcsUri(input_uri));
 
   std::cout << "Reading metadata...";
   std::cout.flush();
-  cuking::StopWatch stop_watch;
   std::string input_path;
   ASSIGN_OR_RETURN(const auto input_fs,
                    arrow::fs::FileSystemFromUri(input_uri, &input_path));
@@ -213,7 +390,7 @@ absl::Status Run() {
   std::cout.flush();
   constexpr uint64_t kCudaBlockSize = 1024;
   const uint64_t kNumCudaBlocks =
-      cuking::CeilIntDiv(uint64_t(num_samples) * num_samples, kCudaBlockSize);
+      CeilIntDiv(uint64_t(num_samples) * num_samples, kCudaBlockSize);
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
       num_samples, words_per_sample, bit_set.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), kMaxResults, results.get(),

@@ -133,7 +133,7 @@ RUN rm -rf build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     cmake --build . -j 16
 
-RUN /deps/extract-elf-so --cert /app/build/packed_parquet_to_bitset /app/build/cuking
+RUN /deps/extract-elf-so --cert /app/build/cuking
 
 FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
