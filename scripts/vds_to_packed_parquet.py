@@ -33,8 +33,9 @@ import os
 @click.option("--sites", help="Sites table path for row filtering", required=True)
 @click.option("--output", help="Output path for Parquet files", required=True)
 @click.option(
-    "--filter_duplicate_sample_ids",
+    "--remove_duplicate_sample_ids",
     help="Whether to remove duplicate sample IDs. Should not be necessary on production datasets.",
+    is_flag=True,
     default=False,
 )
 @click.option(
@@ -42,12 +43,12 @@ import os
     help="Only take this fraction of the beginning of the dataset, useful for benchmarking only.",
     default=None,
 )
-def main(input, sites, output, filter_duplicate_sample_ids, head_fraction):
+def main(input, sites, output, remove_duplicate_sample_ids, head_fraction):
     hl.init(default_reference='GRCh38')
 
     vds = hl.vds.read_vds(input)
 
-    if filter_duplicate_sample_ids:
+    if remove_duplicate_sample_ids:
         import collections
 
         duplicate_samples = [
