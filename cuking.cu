@@ -2,7 +2,6 @@
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <absl/status/status.h>
-#include <absl/status/statusor.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
 #include <arrow/filesystem/filesystem.h>
@@ -162,7 +161,7 @@ absl::Status Run() {
       metadata_file->ReadAt(0, metadata_file_size, metadata_buffer.data()));
   if (metadata_bytes_read != metadata_file_size) {
     return absl::FailedPreconditionError(absl::StrCat(
-        "Expected to read ", metadata_file_size, " metadata bytes, but read ",
+        "Expected to read ", metadata_file_size, " metadata bytes, but got ",
         metadata_bytes_read, " bytes instead"));
   }
   const auto metadata = nlohmann::json::parse(
@@ -195,7 +194,7 @@ absl::Status Run() {
                    bit_set_file->ReadAt(0, bit_set_file_size, bit_set.get()));
   if (bit_set_bytes_read != bit_set_file_size) {
     return absl::FailedPreconditionError(absl::StrCat(
-        "Expected to read ", bit_set_file_size, " bit set bytes, but read ",
+        "Expected to read ", bit_set_file_size, " bit set bytes, but got ",
         bit_set_bytes_read, " bytes instead"));
   }
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
