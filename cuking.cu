@@ -358,7 +358,7 @@ absl::Status Run() {
   // genotype is split into two bits (is_het followed by is_hom_var for each
   // sample), in distinct bit sets.
   const size_t words_per_sample = 2 * CeilIntDiv(num_sites, size_t(64));
-  const size_t bit_set_size = words_per_sample * num_sites;
+  const size_t bit_set_size = words_per_sample * num_samples;
   std::cout << "Allocating "
             << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
             << " MiB of memory for bit set...";
@@ -575,9 +575,6 @@ absl::Status Run() {
         "parameter.");
   }
 
-  std::cout << "Found " << num_results
-            << " coefficients above the cut-off threshold." << std::endl;
-
   std::cout << "Processing results...";
   std::cout.flush();
   // Free some memory for result serialization.
@@ -599,8 +596,9 @@ absl::Status Run() {
                               nlohmann::json(result_map).dump()));
 
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
-  std::cout << "Wrote " << num_results << " results (" << output_metadata.size()
-            << " bytes)." << std::endl;
+  std::cout << "Wrote " << num_results << " coefficients above the threshold ("
+            << CeilIntDiv(output_metadata.size(), size_t(1) << 20) << " MiB)."
+            << std::endl;
 
   return absl::OkStatus();
 }
