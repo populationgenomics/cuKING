@@ -14,11 +14,22 @@ enable_language(CUDA)
 
 find_package(absl REQUIRED)
 find_package(Arrow REQUIRED)
+find_package(google_cloud_cpp_storage REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 add_executable(packed_parquet_to_bitset packed_parquet_to_bitset.cc)
 
 add_executable(cuking cuking.cu)
+
+add_library(gcs_client
+    gcs_client.cc
+)
+
+target_link_libraries(gcs_client PRIVATE
+    absl::status
+    absl::statusor
+    google-cloud-cpp::storage
+)
 
 target_link_libraries(packed_parquet_to_bitset PRIVATE
     absl::flags
@@ -26,6 +37,7 @@ target_link_libraries(packed_parquet_to_bitset PRIVATE
     absl::status
     absl::statusor
     arrow_shared
+    gcs_client
     nlohmann_json::nlohmann_json
     parquet
 )

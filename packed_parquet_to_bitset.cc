@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "gcs_client.h"
 #include "utils.h"
 
 ABSL_FLAG(std::string, input_uri, "",
@@ -194,15 +195,20 @@ absl::Status Run() {
   std::vector<std::shared_ptr<parquet::FileMetaData>> file_metadata(
       file_infos.size());
   ThreadPool thread_pool(num_threads);
+  auto gcs_client = cuking::NewGcsClient(num_threads);
   std::atomic<size_t> num_processed(0);
   RETURN_IF_ERROR(
       ParallelFor(&thread_pool, 0, file_infos.size(), [&](const size_t i) {
         // Reading the entire file is significantly faster than using a standard
         // RandomAccessFile on GCS, probably due to less roundtrips.
-        ASSIGN_OR_RETURN(auto file_buffer,
-                         ReadFile(input_fs.get(), file_infos[i]));
-        auto buffer_reader = std::make_shared<arrow::io::BufferReader>(
-            file_buffer.data(), file_buffer.size());
+        ASSIGN_OR_RETURN(
+            const auto file_buffer,
+            gcs_client->Read(absl::StrCat("gs://", file_infos[i].path())));
+        // ASSIGN_OR_RETURN(auto file_buffer,
+        //                  ReadFile(input_fs.get(), file_infos[i]));
+        auto buffer_reader =
+            std::make_shared<arrow::io::BufferReader>(file_buffer);
+        // file_buffer.data(), file_buffer.size());
         auto file_reader =
             parquet::ParquetFileReader::Open(std::move(buffer_reader));
         file_metadata[i] = file_reader->metadata();

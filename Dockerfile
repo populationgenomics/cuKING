@@ -12,7 +12,7 @@ RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list && \
         g++ \
         git \
         libc-ares-dev \
-        libcurl4-openssl-dev \
+        libcurl4-gnutls-dev \
         libre2-dev \
         libssl-dev \
         pkg-config \
