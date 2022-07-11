@@ -424,20 +424,66 @@ absl::Status Run() {
               file_metadata->num_columns(), " in ", input_file.first));
         }
 
-        // Read all columns fully into memory, this way it's easier to process a
-        // full row afterwards.
+        // Decompress all columns into memory, this way it's easier to process a
+        // full row afterwards. We expect the following schema: row_idx(INT64),
+        // col_idx(INT64), n_alt_alleles(INT32).
         const size_t num_rows = file_metadata->num_rows();
-        std::vector<int32_t> columns[kNumColumns];
-        size_t rows_read[kNumColumns];
-        for (size_t column = 0; column < kNumColumns; ++column) {
-          columns[column].resize(num_rows);
-          rows_read[column] = 0;
-        }
+        std::vector<int64_t> row_idx_buffer, col_idx_buffer;
+        std::vector<int32_t> n_alt_alleles_buffer;
+        row_idx_buffer.resize(num_rows);
+        col_idx_buffer.resize(num_rows);
+        n_alt_alleles_buffer.resize(num_rows);
+        size_t row_idx_offset = 0, col_idx_offset = 0, n_alt_alleles_offset = 0;
         const size_t num_row_groups = file_metadata->num_row_groups();
         for (size_t row_group = 0; row_group < num_row_groups; ++row_group) {
           auto row_group_reader = file_reader->RowGroup(row_group);
-          for (size_t column = 0; column < kNumColumns; ++column) {
-            auto column_reader = row_group_reader->Column(column);
+          // row_idx (INT64)
+          {
+            auto column_reader = row_group_reader->Column(0);
+            if (column_reader->type() != parquet::Type::INT64) {
+              return absl::FailedPreconditionError(
+                  absl::StrCat("Expected INT64 type, found ",
+                               parquet::TypeToString(column_reader->type()),
+                               " in ", input_file.first));
+            }
+            parquet::Int64Reader *const int64_reader =
+                static_cast<parquet::Int64Reader *>(column_reader.get());
+            while (int64_reader->HasNext()) {
+              // We can set def_levels and rep_levels to nullptr, as there are
+              // no undefined values.
+              int64_t values_read = 0;
+              int64_reader->ReadBatch(
+                  num_rows - row_idx_offset, /* def_levels */ nullptr,
+                  /* rep_levels */ nullptr,
+                  row_idx_buffer.data() + row_idx_offset, &values_read);
+              row_idx_offset += values_read;
+            }
+          }
+          // col_idx (INT64)
+          {
+            auto column_reader = row_group_reader->Column(1);
+            if (column_reader->type() != parquet::Type::INT64) {
+              return absl::FailedPreconditionError(
+                  absl::StrCat("Expected INT64 type, found ",
+                               parquet::TypeToString(column_reader->type()),
+                               " in ", input_file.first));
+            }
+            parquet::Int64Reader *const int64_reader =
+                static_cast<parquet::Int64Reader *>(column_reader.get());
+            while (int64_reader->HasNext()) {
+              // We can set def_levels and rep_levels to nullptr, as there are
+              // no undefined values.
+              int64_t values_read = 0;
+              int64_reader->ReadBatch(
+                  num_rows - col_idx_offset, /* def_levels */ nullptr,
+                  /* rep_levels */ nullptr,
+                  col_idx_buffer.data() + col_idx_offset, &values_read);
+              col_idx_offset += values_read;
+            }
+          }
+          // n_alt_alleles (INT32)
+          {
+            auto column_reader = row_group_reader->Column(2);
             if (column_reader->type() != parquet::Type::INT32) {
               return absl::FailedPreconditionError(
                   absl::StrCat("Expected INT32 type, found ",
@@ -451,19 +497,20 @@ absl::Status Run() {
               // no undefined values.
               int64_t values_read = 0;
               int32_reader->ReadBatch(
-                  num_rows - rows_read[column], /* def_levels */ nullptr,
+                  num_rows - n_alt_alleles_offset, /* def_levels */ nullptr,
                   /* rep_levels */ nullptr,
-                  columns[column].data() + rows_read[column], &values_read);
-              rows_read[column] += values_read;
+                  n_alt_alleles_buffer.data() + n_alt_alleles_offset,
+                  &values_read);
+              n_alt_alleles_offset += values_read;
             }
           }
         }
 
         // Update the bit set now that the whole table is in memory.
         for (size_t row = 0; row < num_rows; ++row) {
-          const int32_t row_idx = columns[0][row];
-          const int32_t col_idx = columns[1][row];
-          const int32_t n_alt_alleles = columns[2][row];
+          const int32_t row_idx = row_idx_buffer[row];
+          const int32_t col_idx = col_idx_buffer[row];
+          const int32_t n_alt_alleles = n_alt_alleles_buffer[row];
           // Pointers to the beginning of the bit set for this sample.
           uint64_t *const is_het_ptr =
               bit_set.get() + col_idx * words_per_sample;
