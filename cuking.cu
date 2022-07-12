@@ -33,11 +33,11 @@ ABSL_FLAG(size_t, num_reader_threads, 100,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
 ABSL_FLAG(
-    uint32_t, max_results, 100 << 20,
+    uint32_t, max_results, uint32_t(100) << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
 ABSL_FLAG(
-    float, king_coeff_threshold, 0.0442f,
-    "Only store coefficients larger than this threshold. Defaults to 3rd "
+    float, king_coeff_threshold, 0.0884f,
+    "Only store coefficients larger than this threshold. Defaults to 2nd "
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
 
 namespace {
@@ -143,13 +143,11 @@ struct KingResult {
   float coeff;
 };
 
-__global__ void ComputeKingKernel(const uint32_t num_samples,
-                                  const uint32_t words_per_sample,
-                                  const uint64_t *const bit_sets,
-                                  const float coeff_threshold,
-                                  const uint32_t max_results,
-                                  KingResult *const results,
-                                  uint32_t *const result_index) {
+__global__ void ComputeKingKernel(
+    const uint32_t num_samples, const uint32_t words_per_sample,
+    const uint64_t *const bit_sets, const float coeff_threshold,
+    const uint32_t max_results, KingResult *const results,
+    uint32_t *const result_index, uint32_t *const result_overflow) {
   const uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   const uint64_t i = index / num_samples;
   const uint64_t j = index % num_samples;
@@ -172,6 +170,10 @@ __global__ void ComputeKingKernel(const uint32_t num_samples,
       result.sample_i = i;
       result.sample_j = j;
       result.coeff = coeff;
+    } else {
+      // result_index might overflow 32 bits, therefore keep a dedicated flag
+      // that we ran out of space.
+      atomicMax(result_overflow, 1);
     }
   }
 }
@@ -541,14 +543,16 @@ absl::Status Run() {
       }));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  std::cout << "Allocating memory for results...";
+  const uint32_t max_results = absl::GetFlag(FLAGS_max_results);
+  std::cout << "Allocating "
+            << CeilIntDiv(max_results * sizeof(KingResult), size_t(1) << 20)
+            << " MiB of memory for results...";
   std::cout.flush();
-  const uint32_t kMaxResults = absl::GetFlag(FLAGS_max_results);
-  auto results = NewCudaArray<KingResult>(kMaxResults);
-  memset(results.get(), 0, sizeof(KingResult) * kMaxResults);
-  // We just need a single value.
-  auto result_index = NewCudaArray<uint32_t>(1);
-  result_index[0] = 0;
+  auto results = NewCudaArray<KingResult>(max_results);
+  memset(results.get(), 0, sizeof(KingResult) * max_results);
+  // Result counter and overflow flag.
+  auto result_index_and_flag = NewCudaArray<uint32_t>(2);
+  result_index_and_flag[0] = result_index_and_flag[1] = 0;
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   std::cout << "Running KING CUDA kernel for " << num_samples << " samples...";
@@ -558,32 +562,29 @@ absl::Status Run() {
       CeilIntDiv(uint64_t(num_samples) * num_samples, kCudaBlockSize);
   ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
       num_samples, words_per_sample, bit_set.get(),
-      absl::GetFlag(FLAGS_king_coeff_threshold), kMaxResults, results.get(),
-      result_index.get());
+      absl::GetFlag(FLAGS_king_coeff_threshold), max_results, results.get(),
+      &result_index_and_flag[0], &result_index_and_flag[1]);
 
   // Wait for GPU to finish before accessing on host.
   cudaDeviceSynchronize();
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  // Free some memory for postprocessing.
-  bit_set.reset();
-
-  const uint32_t num_results = result_index[0];
-  if (num_results > kMaxResults) {
+  if (result_index_and_flag[1] != 0) {
     return absl::ResourceExhaustedError(
-        "Could not store all results: try increasing the --max_results "
-        "parameter.");
+        absl::StrCat("Could not store all results: try increasing the "
+                     "--max_results parameter."));
   }
 
-  std::cout << "Processing results...";
+  const uint32_t num_results = result_index_and_flag[0];
+  std::cout << "Processing " << num_results << " results...";
   std::cout.flush();
-  // Free some memory for result serialization.
+  // Free some memory for postprocessing.
   bit_set.reset();
   // Create a map for JSON serialization.
   absl::flat_hash_map<std::string_view,
                       absl::flat_hash_map<std::string_view, float>>
       result_map;
-  for (size_t i = 0; i < num_results; ++i) {
+  for (uint32_t i = 0; i < num_results; ++i) {
     const auto &result = results[i];
     result_map[sample_ids[result.sample_i]][sample_ids[result.sample_j]] =
         result.coeff;
@@ -596,9 +597,8 @@ absl::Status Run() {
                               nlohmann::json(result_map).dump()));
 
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
-  std::cout << "Wrote " << num_results << " coefficients above the threshold ("
-            << CeilIntDiv(output_metadata.size(), size_t(1) << 20) << " MiB)."
-            << std::endl;
+  std::cout << "Wrote " << CeilIntDiv(output_metadata.size(), size_t(1) << 20)
+            << " MiB." << std::endl;
 
   return absl::OkStatus();
 }
