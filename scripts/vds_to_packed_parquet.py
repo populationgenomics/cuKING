@@ -40,6 +40,7 @@ import os
 )
 @click.option(
     "--head_fraction",
+    type=click.FLOAT,
     help="Only take this fraction of the beginning of the dataset, useful for benchmarking only.",
     default=None,
 )
