@@ -31,7 +31,7 @@ RUN mkdir -p /deps/abseil-cpp && cd /deps/abseil-cpp && \
       -DBUILD_TESTING=OFF \
       -DBUILD_SHARED_LIBS=yes \
       -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 RUN mkdir -p /deps/protobuf && cd /deps/protobuf && \
@@ -43,7 +43,7 @@ RUN mkdir -p /deps/protobuf && cd /deps/protobuf && \
         -Dprotobuf_BUILD_TESTS=OFF \
         -Dprotobuf_ABSL_PROVIDER=package \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 RUN mkdir -p /deps/grpc && cd /deps/grpc && \
@@ -61,7 +61,7 @@ RUN mkdir -p /deps/grpc && cd /deps/grpc && \
         -DgRPC_SSL_PROVIDER=package \
         -DgRPC_ZLIB_PROVIDER=package \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 RUN mkdir -p /deps/crc32c && cd /deps/crc32c && \
@@ -74,7 +74,7 @@ RUN mkdir -p /deps/crc32c && cd /deps/crc32c && \
         -DCRC32C_BUILD_BENCHMARKS=OFF \
         -DCRC32C_USE_GLOG=OFF \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 RUN mkdir -p /deps/json && cd /deps/json && \
@@ -86,7 +86,7 @@ RUN mkdir -p /deps/json && cd /deps/json && \
         -DBUILD_TESTING=OFF \
         -DJSON_BuildTests=OFF \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 RUN mkdir -p /deps/google-cloud-cpp && cd /deps/google-cloud-cpp && \
@@ -100,22 +100,21 @@ RUN mkdir -p /deps/google-cloud-cpp && cd /deps/google-cloud-cpp && \
         -DGOOGLE_CLOUD_CPP_ENABLE_EXAMPLES=OFF \
         -DCMAKE_INSTALL_MESSAGE=NEVER \
         -H. -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 16 && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
-# Use non-release version to get the GCS fix included in https://github.com/apache/arrow/pull/12763.
-RUN cd /deps && \
-    git clone https://github.com/apache/arrow.git && \
-    cd arrow && \
-    git checkout 6f95d9dfdd523dc5fa30505c68bf5f1b547e0e30 && \
+RUN mkdir -p /deps/arrow && cd /deps/arrow && \
+    curl -sSL https://github.com/apache/arrow/archive/refs/tags/apache-arrow-8.0.0.tar.gz | tar -xzf - --strip-components=1 && \
     mkdir build && cd build && \
     cmake ../cpp \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DARROW_BUILD_STATIC=OFF \
         -DARROW_PARQUET=ON \
-        -DARROW_WITH_ZSTD=ON && \
-    cmake --build . --target install -- -j 16 && \
+        -DARROW_WITH_ZSTD=ON \
+        -DARROW_COMPUTE=OFF \
+        -B cmake-out && \
+    cmake --build cmake-out --target install -- -j 8 && \
     ldconfig
 
 # extract-elf-so tars .so files to create small Docker images.
@@ -131,7 +130,7 @@ RUN rm -rf build && \
     mkdir build && \
     cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    cmake --build . -j 16
+    cmake --build . -j 8
 
 RUN /deps/extract-elf-so --cert /app/build/cuking
 
