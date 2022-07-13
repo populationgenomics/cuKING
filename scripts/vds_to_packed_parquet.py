@@ -39,12 +39,20 @@ import os
     default=False,
 )
 @click.option(
+    "--filter_gnomad_adj",
+    help="Whether to filter variants based on gnomad.utils.annotations.annotate_adj",
+    is_flag=True,
+    default=False,
+)
+@click.option(
     "--head_fraction",
     type=click.FLOAT,
     help="Only take this fraction of the beginning of the dataset, useful for benchmarking only.",
     default=None,
 )
-def main(input, sites, output, remove_duplicate_sample_ids, head_fraction):
+def main(
+    input, sites, output, remove_duplicate_sample_ids, filter_gnomad_adj, head_fraction
+):
     hl.init(default_reference='GRCh38')
 
     vds = hl.vds.read_vds(input)
@@ -81,8 +89,9 @@ def main(input, sites, output, remove_duplicate_sample_ids, head_fraction):
     mt = hl.vds.to_dense_mt(vds)
 
     # Apply basic variant QC.
-    mt = annotate_adj(mt)
-    mt = mt.filter_entries(mt.adj)
+    if filter_gnomad_adj:
+        mt = annotate_adj(mt)
+        mt = mt.filter_entries(mt.adj)
 
     # Compute the field required for KING.
     mt = mt.select_entries(n_alt_alleles=mt.GT.n_alt_alleles())
