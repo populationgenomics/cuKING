@@ -3,7 +3,7 @@ steps:
     args: ['build', '-t', 'us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest', '.']
     env:
       - 'DOCKER_BUILDKIT=1'
-images: ['LOCATION-us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest']
+images: ['us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest']
 timeout: 3600s
 options:
  machineType: 'E2_HIGHCPU_8'
