@@ -29,6 +29,9 @@ ABSL_FLAG(std::string, input_uri, "",
 ABSL_FLAG(std::string, output_uri, "",
           "The sparse relatedness matrix JSON output GCS URI, e.g. "
           "gs://some/bucket/relatedness.json");
+ABSL_FLAG(
+    std::string, requester_pays_project, "",
+    "The user project to use for accessing Requester Pays buckets on GCS.");
 ABSL_FLAG(size_t, num_reader_threads, 100,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
@@ -322,6 +325,9 @@ absl::Status Run() {
     return absl::InvalidArgumentError("Invalid number of reader threads");
   }
 
+  const gcs::UserProject requester_pays_project(
+      absl::GetFlag(FLAGS_requester_pays_project));
+
   StopWatch stop_watch;
   std::cout << "Reading metadata...";
   std::cout.flush();
@@ -331,7 +337,8 @@ absl::Status Run() {
       gcs::Client(google::cloud::Options{}.set<gcs::ConnectionPoolSizeOption>(
           num_reader_threads));
   auto metadata_stream = gcs_client.ReadObject(
-      input_bucket, absl::StrCat(input_path, "/metadata.json"));
+      input_bucket, absl::StrCat(input_path, "/metadata.json"),
+      requester_pays_project);
   if (metadata_stream.bad()) {
     return absl::FailedPreconditionError(absl::StrCat(
         "Failed to read metadata: ", metadata_stream.status().message()));
@@ -376,8 +383,8 @@ absl::Status Run() {
   std::cout << "Listing input files...";
   std::cout.flush();
   std::vector<std::pair<std::string, size_t>> input_files;
-  for (const auto &blob_metadata_or_status :
-       gcs_client.ListObjects(input_bucket, gcs::Prefix(input_path))) {
+  for (const auto &blob_metadata_or_status : gcs_client.ListObjects(
+           input_bucket, gcs::Prefix(input_path), requester_pays_project)) {
     ASSIGN_OR_RETURN(const auto &blob_metadata, blob_metadata_or_status);
     if (!absl::EndsWith(blob_metadata.name(), ".parquet")) {
       continue;  // Skip files that are not Parquet tables.
@@ -594,7 +601,8 @@ absl::Status Run() {
       const auto output_metadata,
       gcs_client.InsertObject(std::string(output_bucket_and_path.first),
                               std::string(output_bucket_and_path.second),
-                              nlohmann::json(result_map).dump()));
+                              nlohmann::json(result_map).dump(),
+                              requester_pays_project));
 
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
   std::cout << "Wrote " << CeilIntDiv(output_metadata.size(), size_t(1) << 20)
