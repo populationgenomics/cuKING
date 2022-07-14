@@ -240,7 +240,7 @@ class ThreadPool {
 
   ~ThreadPool() {
     {
-      absl::MutexLock l(&mu_);
+      const absl::MutexLock lock(&mu_);
       for (size_t i = 0; i < threads_.size(); i++) {
         queue_.push(nullptr);  // Shutdown signal.
       }
