@@ -56,14 +56,12 @@ In the meantime, build the Docker image for `cuKING` using Cloud Build:
 gcloud builds submit --config cloudbuild.yaml .
 ```
 
-Once the Parquet tables have been created, use the [`pipeline.yaml`](pipeline.yaml) definition to launch a single VM with an NVIDIA A100 GPU to run `cuKING`:
+Once the Parquet tables have been created, use the [`pipeline.yaml`](pipeline.yaml) definition to launch a single VM with an NVIDIA A100 GPU to run `cuKING`. `--env-vars` is used instead of `--inputs` because the latter also copies files instead of passing GCS URIs as literal values.
 
 ```sh
 gcloud beta lifesciences pipelines run \
-    --regions=us-central1 \
     --pipeline-file=pipeline.yaml \
-  --service-account-email dataproc@cpg-gnomad-production-27bb.iam.gserviceaccount.com \
-  --machine-type a2-highgpu-1g --preemptible --env-vars=INPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_packed.parquet,OUTPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json,KING_COEFF_THRESHOLD=0.1,LOGGING_OUTPUT=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.log
+    --env-vars=INPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_packed.parquet,OUTPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json,KING_COEFF_THRESHOLD=0.1,LOGGING_OUTPUT=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.log
 ```
 
 The resulting JSON file contains a sparse dictionary that only contains sample pairs with KING coefficients larger than the specified threshold.

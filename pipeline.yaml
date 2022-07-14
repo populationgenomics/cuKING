@@ -10,4 +10,15 @@ actions:
   - -c
   - gsutil -u cpg-gnomad-production-27bb -m -q cp /google/logs/output ${LOGGING_OUTPUT}
   imageUri: google/cloud-sdk:slim
+resources:
+  regions:
+  - us-central1
+  virtualMachine:
+    bootDiskSizeGb: 10
+    bootImage: projects/cos-cloud/global/images/family/cos-97-lts
+    machineType: a2-highgpu-1g
+    nvidiaDriverVersion: 470.82.01
+    preemptible: true
+    serviceAccount:
+      email: dataproc@cpg-gnomad-production-27bb.iam.gserviceaccount.com
 timeout: 72000s
