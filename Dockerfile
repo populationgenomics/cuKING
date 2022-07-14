@@ -1,54 +1,68 @@
-FROM nvidia/cuda:11.7.0-devel-ubuntu22.04 AS dev
+FROM ubuntu:22.04 AS dev
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Remove nvidia repositories to work around https://github.com/NVIDIA/nvidia-docker/issues/1402
-RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list && \
-    apt update && apt install --no-install-recommends -y \
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y \
         apt-transport-https \
         ca-certificates \
         cmake \
         curl \
         g++ \
         git \
+        gnupg \
         libc-ares-dev \
         libcurl4-gnutls-dev \
         libre2-dev \
         libssl-dev \
+        make \
+        ninja-build \
         pkg-config \
         zlib1g-dev
 
 # Google Cloud SDK
 RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
-    apt update && apt install -y google-cloud-sdk
+    apt-get update && apt-get install -y google-cloud-sdk
+
+# Install the CUDA Toolkit manually: We need an old enough CUDA version to be compatible
+# with the NVIDIA driver in the Container-Optimized OS images. At the same time we need
+# at least Ubuntu 22.04 to get a recent enough g++. Unfortunately this combination isn't
+# available in any of the prebuilt nvidia/cuda Docker images.
+RUN curl -O https://developer.download.nvidia.com/compute/cuda/11.4.4/local_installers/cuda_11.4.4_470.82.01_linux.run && \
+    bash cuda_11.4.4_470.82.01_linux.run --silent --toolkit && \
+    rm cuda_11.4.4_470.82.01_linux.run
 
 RUN mkdir -p /deps/abseil-cpp && cd /deps/abseil-cpp && \
     curl -sSL https://github.com/abseil/abseil-cpp/archive/refs/tags/20220623.0.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CXX_STANDARD=17 \
-      -DBUILD_TESTING=OFF \
-      -DBUILD_SHARED_LIBS=yes \
-      -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_STANDARD=17 \
+        -DABSL_PROPAGATE_CXX_STD=ON \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_SHARED_LIBS=yes \
+        -S . -B cmake-out && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/protobuf && cd /deps/protobuf && \
     curl -sSL https://github.com/protocolbuffers/protobuf/archive/v21.1.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DBUILD_SHARED_LIBS=yes \
         -Dprotobuf_BUILD_TESTS=OFF \
         -Dprotobuf_ABSL_PROVIDER=package \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/grpc && cd /deps/grpc && \
     curl -sSL https://github.com/grpc/grpc/archive/v1.46.3.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DBUILD_SHARED_LIBS=yes \
@@ -61,12 +75,13 @@ RUN mkdir -p /deps/grpc && cd /deps/grpc && \
         -DgRPC_SSL_PROVIDER=package \
         -DgRPC_ZLIB_PROVIDER=package \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/crc32c && cd /deps/crc32c && \
     curl -sSL https://github.com/google/crc32c/archive/1.1.2.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DBUILD_SHARED_LIBS=yes \
@@ -74,24 +89,26 @@ RUN mkdir -p /deps/crc32c && cd /deps/crc32c && \
         -DCRC32C_BUILD_BENCHMARKS=OFF \
         -DCRC32C_USE_GLOG=OFF \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/json && cd /deps/json && \
     curl -sSL https://github.com/nlohmann/json/archive/v3.10.5.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DBUILD_SHARED_LIBS=yes \
         -DBUILD_TESTING=OFF \
         -DJSON_BuildTests=OFF \
         -S . -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/google-cloud-cpp && cd /deps/google-cloud-cpp && \
     curl -sSL https://github.com/googleapis/google-cloud-cpp/archive/refs/tags/v1.41.0.tar.gz | tar -xzf - --strip-components=1 && \
     cmake \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DBUILD_SHARED_LIBS=yes \
@@ -100,21 +117,20 @@ RUN mkdir -p /deps/google-cloud-cpp && cd /deps/google-cloud-cpp && \
         -DGOOGLE_CLOUD_CPP_ENABLE_EXAMPLES=OFF \
         -DCMAKE_INSTALL_MESSAGE=NEVER \
         -H. -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 RUN mkdir -p /deps/arrow && cd /deps/arrow && \
     curl -sSL https://github.com/apache/arrow/archive/refs/tags/apache-arrow-8.0.0.tar.gz | tar -xzf - --strip-components=1 && \
-    mkdir build && cd build && \
-    cmake ../cpp \
+    cmake cpp \
+        -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
         -DARROW_BUILD_STATIC=OFF \
         -DARROW_PARQUET=ON \
         -DARROW_WITH_ZSTD=ON \
-        -DARROW_COMPUTE=OFF \
         -B cmake-out && \
-    cmake --build cmake-out --target install -- -j 8 && \
+    cmake --build cmake-out --target install && \
     ldconfig
 
 # extract-elf-so tars .so files to create small Docker images.
@@ -126,15 +142,15 @@ FROM dev as extract
 COPY . /app/
 WORKDIR /app
 
-RUN rm -rf build && \
-    mkdir build && \
-    cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    cmake --build . -j 8
+RUN cmake \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -B cmake-out && \
+    cmake --build cmake-out
 
-RUN /deps/extract-elf-so --cert /app/build/cuking
+RUN /deps/extract-elf-so --cert /app/cmake-out/cuking
 
-FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
+FROM ubuntu:22.04 AS minimal
 
 RUN --mount=type=bind,from=extract,source=/app/rootfs.tar,target=/rootfs.tar \
     tar xf /rootfs.tar && \
