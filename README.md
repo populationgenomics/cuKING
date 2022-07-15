@@ -61,7 +61,7 @@ Once the Parquet tables have been created, `cuKING` needs to run on a VM with an
 ```sh
 PROJECT=cpg-gnomad-production-27bb \
 INPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v3.1_qc_mt_v2_sites_dense_king_packed.parquet \
-OUTPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json KING_COEFF_THRESHOLD=0.5 \
+OUTPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json KING_COEFF_THRESHOLD=0.05 \
 LOGGING_OUTPUT=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json \
 ./run_cuking.sh
 ```
