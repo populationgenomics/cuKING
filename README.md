@@ -56,7 +56,7 @@ In the meantime, build the Docker image for `cuKING` using Cloud Build:
 gcloud builds submit --config cloudbuild.yaml .
 ```
 
-Once the Parquet tables have been created, `cuKING` needs to run on a VM with an NVIDIA A100 GPU. Cloud Batch with a Container-Optimized OS instance would be ideal for this, but at the time of writing the supported NVIDIA drivers aren't recent enough. We therefore schedule an instance manually and use a startup script to install drivers manually and launch the Docker container. This is wrapped in [`run_cuking.sh`](run_cuking.sh):
+Once the Parquet tables have been created, `cuKING` needs to run on a VM with an NVIDIA A100 GPU. Cloud Batch with a Container-Optimized OS instance would be ideal for this, but at the time of writing the supported NVIDIA drivers aren't recent enough. We therefore schedule an instance manually and use a startup script to install drivers and launch the Docker container. This is wrapped in [`run_cuking.sh`](run_cuking.sh):
 
 ```sh
 PROJECT=cpg-gnomad-production-27bb \
