@@ -1,4 +1,4 @@
-FROM ubuntu:22.04 AS dev
+FROM nvidia/cuda:11.7.0-devel-ubuntu22.04 AS dev
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -24,14 +24,6 @@ RUN apt-get update && \
 RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
     apt-get update && apt-get install -y google-cloud-sdk
-
-# Install the CUDA Toolkit manually: We need an old enough CUDA version to be compatible
-# with the NVIDIA driver in the Container-Optimized OS images. At the same time we need
-# at least Ubuntu 22.04 to get a recent enough g++. Unfortunately this combination isn't
-# available in any of the prebuilt nvidia/cuda Docker images.
-RUN curl -O https://developer.download.nvidia.com/compute/cuda/11.4.4/local_installers/cuda_11.4.4_470.82.01_linux.run && \
-    bash cuda_11.4.4_470.82.01_linux.run --silent --toolkit && \
-    rm cuda_11.4.4_470.82.01_linux.run
 
 RUN mkdir -p /deps/abseil-cpp && cd /deps/abseil-cpp && \
     curl -sSL https://github.com/abseil/abseil-cpp/archive/refs/tags/20220623.0.tar.gz | tar -xzf - --strip-components=1 && \
@@ -150,7 +142,7 @@ RUN cmake \
 
 RUN /deps/extract-elf-so --cert /app/cmake-out/cuking
 
-FROM ubuntu:22.04 AS minimal
+FROM nvidia/cuda:11.7.0-base-ubuntu22.04 AS minimal
 
 RUN --mount=type=bind,from=extract,source=/app/rootfs.tar,target=/rootfs.tar \
     tar xf /rootfs.tar && \
