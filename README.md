@@ -66,4 +66,4 @@ LOGGING_OUTPUT=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedne
 ./run_cuking.sh
 ```
 
-The resulting JSON file contains a sparse dictionary that only contains sample pairs with KING coefficients larger than the specified threshold.
+This instance will shut itself down once the Docker container exits. The above script will then delete the instance. `OUTPUT_URI` will contain a sparse dictionary that only contains sample pairs with relatedness coefficients larger than `KING_COEFF_THRESHOLD`. `LOGGING_OUTPUT` will contain all logs from the Docker container.
