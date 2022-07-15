@@ -404,8 +404,8 @@ absl::Status Run() {
         // Make a copy of the GCS client for thread-safety.
         gcs::Client gcs_client_copy = gcs_client;
         const auto &input_file = input_files[i];
-        auto input_stream =
-            gcs_client_copy.ReadObject(input_bucket, input_file.first);
+        auto input_stream = gcs_client_copy.ReadObject(
+            input_bucket, input_file.first, requester_pays_project);
         if (input_stream.bad()) {
           return absl::FailedPreconditionError(
               absl::StrCat("Failed to read ", input_files[i].first, ": ",
