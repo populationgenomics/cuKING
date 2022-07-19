@@ -59,7 +59,7 @@ gcloud builds submit --config cloudbuild.yaml .
 Once the Parquet tables have been created, `cuKING` needs to run on a VM with an NVIDIA A100 GPU, which can be scheduled using Cloud Batch. A Container-Optimized OS instance would be ideal for this, but at the time of writing the preview version of Cloud Batch doesn't support COS yet. Instead, create an Ubuntu-based virtual machine instance template, which includes a [startup script](instance_startup_script.sh) to install recent NVIDIA drivers:
 
 ```sh
-gcloud compute instance-templates create cuking-instance-template-1 \
+gcloud compute instance-templates create cuking-instance-template \
     --project=cpg-gnomad-production-27bb \
     --machine-type=a2-highgpu-1g \
     --network-interface=network=default,network-tier=PREMIUM \
