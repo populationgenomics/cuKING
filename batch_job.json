@@ -1,0 +1,23 @@
+{
+  "taskGroups": [
+    {
+      "taskSpec": {
+        "computeResource": {
+          "cpuMilli": 12000,
+          "memoryMib": 87040
+        },
+        "maxRunDuration": "36000s"
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "instanceTemplate": "cuking-instance-template"
+      }
+    ]
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}

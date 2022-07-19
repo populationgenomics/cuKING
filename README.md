@@ -56,14 +56,44 @@ In the meantime, build the Docker image for `cuKING` using Cloud Build:
 gcloud builds submit --config cloudbuild.yaml .
 ```
 
-Once the Parquet tables have been created, `cuKING` needs to run on a VM with an NVIDIA A100 GPU. Cloud Batch with a Container-Optimized OS instance would be ideal for this, but at the time of writing the supported NVIDIA drivers aren't recent enough. We therefore schedule an instance manually and use a startup script to install drivers and launch the Docker container. This is wrapped in [`run_cuking.sh`](run_cuking.sh):
+Once the Parquet tables have been created, `cuKING` needs to run on a VM with an NVIDIA A100 GPU, which can be scheduled using Cloud Batch. A Container-Optimized OS instance would be ideal for this, but at the time of writing the preview version of Cloud Batch doesn't support COS yet. Instead, create an Ubuntu-based virtual machine instance template, which includes a [startup script](instance_startup_script.sh) to install recent NVIDIA drivers:
 
 ```sh
-PROJECT=cpg-gnomad-production-27bb \
-INPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v3.1_qc_mt_v2_sites_dense_king_packed.parquet \
-OUTPUT_URI=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json KING_COEFF_THRESHOLD=0.05 \
-LOGGING_OUTPUT=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json \
-./run_cuking.sh
+gcloud compute instance-templates create cuking-instance-template-1 \
+    --project=cpg-gnomad-production-27bb \
+    --machine-type=a2-highgpu-1g \
+    --network-interface=network=default,network-tier=PREMIUM \
+    --metadata-from-file=startup-script=instance_startup_script.sh \
+    --maintenance-policy=TERMINATE \
+    --provisioning-model=STANDARD \
+    --service-account=cuking@cpg-gnomad-production-27bb.iam.gserviceaccount.com \
+    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --accelerator=count=1,type=nvidia-tesla-a100 \
+    --create-disk=auto-delete=yes,boot=yes,device-name=cuking-instance-template,image=projects/ubuntu-os-cloud/global/images/ubuntu-1804-bionic-v20220712,mode=rw,size=10,type=pd-balanced \
+    --no-shielded-secure-boot \
+    --shielded-vtpm \
+    --shielded-integrity-monitoring \
+    --reservation-affinity=any
 ```
 
-This instance will shut itself down once the Docker container exits. The above script will then delete the instance. `OUTPUT_URI` will contain a sparse dictionary that only contains sample pairs with relatedness coefficients larger than `KING_COEFF_THRESHOLD`. `LOGGING_OUTPUT` will contain all logs from the Docker container.
+To launch `cuKING`, submit a Cloud Batch job, e.g.:
+
+```sh
+gcloud beta batch jobs submit cuking-gnomad-v4 \
+    --location=us-central1 \
+    --config=batch_job.json \
+    --script-text="sudo docker run --name cuking --gpus all
+    us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest cuking
+    --input_uri=gs://cpg-gnomad-production/relatedness/gnomad_v3.1_qc_mt_v2_sites_dense_king_packed.parquet
+    --output_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json
+    --requester_pays_project=cpg-gnomad-production-27bb
+    --king_coeff_threshold=0.05"
+```
+
+Run the following to check the status of the job:
+
+```sh
+gcloud beta batch jobs describe cuking-gnomad-v4
+```
+
+If there are any errors, they'll show up in Cloud Logging for that particular Cloud Batch job.
