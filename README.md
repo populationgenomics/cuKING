@@ -84,10 +84,10 @@ gcloud beta batch jobs submit cuking-gnomad-v4 \
     --config=batch_job.json \
     --script-text="sudo docker run --name cuking --gpus all
     us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest cuking
-    --input_uri=gs://cpg-gnomad-production/relatedness/gnomad_v3.1_qc_mt_v2_sites_dense_king_packed.parquet
+    --input_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_packed.parquet
     --output_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json
-    --requester_pays_project=cpg-gnomad-production-27bb
-    --king_coeff_threshold=0.05"
+    --king_coeff_threshold=0.05
+    --requester_pays_project=cpg-gnomad-production-27bb"
 ```
 
 Run the following to check the status of the job:
