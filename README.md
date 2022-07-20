@@ -62,7 +62,7 @@ Once the Parquet tables have been created, `cuKING` needs to run on a VM with an
 gcloud compute instance-templates create cuking-instance-template \
     --project=cpg-gnomad-production-27bb \
     --machine-type=a2-highgpu-1g \
-    --network-interface=network=default,network-tier=PREMIUM \
+    --network-interface=network=default,network-tier=PREMIUM,address="" \
     --metadata-from-file=startup-script=instance_startup_script.sh \
     --maintenance-policy=TERMINATE \
     --provisioning-model=STANDARD \
