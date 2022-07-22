@@ -97,8 +97,7 @@ def main(
 
     # Write metadata that's useful for postprocessing. Map `col_idx` to `s` explicitly
     # so we don't need to rely on a particular order returned by `collect`.
-    mt = mt.annotate_cols(col_idx_mapping=hl.struct(col_idx=mt.col_idx, s=mt.s))
-    col_idx_mapping = mt.col_idx_mapping.collect()
+    col_idx_mapping = hl.struct(col_idx=mt.col_idx, s=mt.s).collect()
     col_idx_mapping.sort(key=lambda e: e.col_idx)
     metadata = {
         'num_sites': sites_table.count(),
