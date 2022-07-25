@@ -42,6 +42,13 @@ ABSL_FLAG(
     float, king_coeff_threshold, 0.0884f,
     "Only store coefficients larger than this threshold. Defaults to 2nd "
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
+ABSL_FLAG(
+    uint32_t, split_factor, 1,
+    "The factor used to split the relatedness matrix into submatrices for sharding.");
+ABSL_FLAG(
+    uint32_t, shard_index, 0,
+    "The shard index, only used when split_factor > 1. "
+    "The index must be in [0, split_factor * (split_factor + 1) / 2).");
 
 namespace {
 
@@ -148,7 +155,7 @@ struct KingResult {
 
 __global__ void ComputeKingKernel(
     const uint32_t num_samples, const uint32_t words_per_sample,
-    const uint64_t *const bit_sets, const float coeff_threshold,
+    const uint64_t *const bit_set, const float coeff_threshold,
     const uint32_t max_results, KingResult *const results,
     uint32_t *const result_index, uint32_t *const result_overflow) {
   const uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -162,8 +169,8 @@ __global__ void ComputeKingKernel(
   const uint64_t offset_i = i * words_per_sample;
   const uint64_t offset_j = j * words_per_sample;
   const float coeff = ComputeKing(
-      bit_sets + offset_i, bit_sets + offset_i + num_entries,
-      bit_sets + offset_j, bit_sets + offset_j + num_entries, num_entries);
+      bit_set + offset_i, bit_set + offset_i + num_entries,
+      bit_set + offset_j, bit_set + offset_j + num_entries, num_entries);
 
   if (coeff > coeff_threshold) {
     // Reserve a result slot atomically to avoid collisions.
@@ -323,6 +330,16 @@ absl::Status Run() {
   const auto num_reader_threads = absl::GetFlag(FLAGS_num_reader_threads);
   if (num_reader_threads == 0) {
     return absl::InvalidArgumentError("Invalid number of reader threads");
+  }
+
+  const auto split_factor = absl::GetFlag(FLAGS_split_factor);
+  if (split_factor == 0) {
+    return absl::InvalidArgumentError("Invalid split factor");
+  }
+
+  const auto shard_index = absl::GetFlag(FLAGS_shard_index);
+  if (shard_index >= split_factor * (split_factor + 1) / 2) {
+    return absl::InvalidArgumentError("Invalid shard index");
   }
 
   const gcs::UserProject requester_pays_project(
