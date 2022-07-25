@@ -114,7 +114,7 @@ struct KingResult {
 };
 
 // The maximum number of schedulable blocks in the y and z dimension.
-const uint32_t kMaxBlocksYZ = 65535u;
+constexpr uint32_t kMaxBlocksYZ = 65535u;
 
 __global__ void ComputeKingKernel(
     const uint32_t num_samples, const uint32_t words_per_sample,
@@ -163,7 +163,7 @@ __global__ void ComputeKingKernel(
   // Perform a warp-wide partial reduction.
   // See https://developer.nvidia.com/blog/faster-parallel-reductions-kepler.
   for (uint32_t delta = warpSize / 2; delta > 0; delta /= 2) {
-    const uint32_t kMask = 31;  // All threads are participating.
+    constexpr uint32_t kMask = 31;  // All threads are participating.
     num_het_i += __shfl_down_sync(kMask, num_het_i, delta);
     num_het_j += __shfl_down_sync(kMask, num_het_j, delta);
     num_both_het += __shfl_down_sync(kMask, num_both_het, delta);
@@ -183,9 +183,9 @@ __global__ void ComputeKingKernel(
 
   // The first thread in each warp adds the reduced value to shared memory.
   if ((threadIdx.x & (warpSize - 1)) == 0) {
-    // We use atomics to reduce the amount of shared memory, to increase
-    // occupancy.
-    // TODO: check what's faster.
+    // We use atomics to reduce the required amount of shared memory, to allow
+    // higher occupancy. It doesn't seem to make a difference performance-wise
+    // on an A100 though.
     atomicAdd(&shared_num_het_i, num_het_i);
     atomicAdd(&shared_num_het_j, num_het_j);
     atomicAdd(&shared_num_both_het, num_both_het);
@@ -401,7 +401,7 @@ absl::Status Run() {
   // Use 4 full warps for maximized coalesced memory access. In order to have
   // all threads active for partial reductions, pad the number of sites
   // accordingly.
-  const uint32_t kNumBlockThreads = 128;
+  constexpr uint32_t kNumBlockThreads = 128;
   const uint32_t num_sites =
       CeilIntDiv(uint32_t(metadata["num_sites"]), kNumBlockThreads) *
       kNumBlockThreads;
