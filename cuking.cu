@@ -162,27 +162,28 @@ __global__ void ComputeKingKernel(
 
   // Perform a warp-wide partial reduction.
   // See https://developer.nvidia.com/blog/faster-parallel-reductions-kepler.
+  const uint32_t shfl_mask = warpSize - 1;  // All threads are participating.
   for (uint32_t delta = warpSize / 2; delta > 0; delta /= 2) {
-    constexpr uint32_t kMask = 31;  // All threads are participating.
-    num_het_i += __shfl_down_sync(kMask, num_het_i, delta);
-    num_het_j += __shfl_down_sync(kMask, num_het_j, delta);
-    num_both_het += __shfl_down_sync(kMask, num_both_het, delta);
-    num_opposing_hom += __shfl_down_sync(kMask, num_opposing_hom, delta);
+    num_het_i += __shfl_down_sync(shfl_mask, num_het_i, delta);
+    num_het_j += __shfl_down_sync(shfl_mask, num_het_j, delta);
+    num_both_het += __shfl_down_sync(shfl_mask, num_both_het, delta);
+    num_opposing_hom += __shfl_down_sync(shfl_mask, num_opposing_hom, delta);
   }
 
   // The first thread initializes the shared memory.
   static __shared__ uint32_t shared_num_het_i, shared_num_het_j,
       shared_num_both_het, shared_num_opposing_hom;
   if (threadIdx.x == 0) {
-    shared_num_het_i = 0;
-    shared_num_het_j = 0;
-    shared_num_both_het = 0;
-    shared_num_opposing_hom = 0;
+    shared_num_het_i = num_het_i;
+    shared_num_het_j = num_het_j;
+    shared_num_both_het = num_both_het;
+    shared_num_opposing_hom = num_opposing_hom;
   }
   __syncthreads();
 
-  // The first thread in each warp adds the reduced value to shared memory.
-  if ((threadIdx.x & (warpSize - 1)) == 0) {
+  // The first thread in all other warps adds their reduced values to shared
+  // memory.
+  if (threadIdx.x > 0 && (threadIdx.x & (warpSize - 1)) == 0) {
     // We use atomics to reduce the required amount of shared memory, to allow
     // higher occupancy. It doesn't seem to make a difference performance-wise
     // on an A100 though.
