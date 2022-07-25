@@ -195,29 +195,29 @@ __global__ void ComputeKingKernel(
 
   // The first thread computes the final value, corresponding to the
   // "between-family" estimator.
-  if (threadIdx.x == 0) {
-    const uint32_t min_hets = shared_num_het_i < shared_num_het_j
-                                  ? shared_num_het_i
-                                  : shared_num_het_j;
-    const float coeff =
-        0.5f + (2.f * shared_num_both_het - 4.f * shared_num_opposing_hom -
-                shared_num_het_i - shared_num_het_j) /
-                   (4.f * min_hets);
+  if (threadIdx.x != 0) {
+    return;
+  }
+  const uint32_t min_hets =
+      shared_num_het_i < shared_num_het_j ? shared_num_het_i : shared_num_het_j;
+  const float coeff =
+      0.5f + (2.f * shared_num_both_het - 4.f * shared_num_opposing_hom -
+              shared_num_het_i - shared_num_het_j) /
+                 (4.f * min_hets);
 
-    // Only emit results above the threshold.
-    if (coeff > coeff_threshold) {
-      // Reserve a result slot atomically to avoid collisions.
-      const uint32_t reserved = atomicAdd(result_index, 1u);
-      if (reserved < max_results) {
-        KingResult &result = results[reserved];
-        result.sample_i = i;
-        result.sample_j = j;
-        result.coeff = coeff;
-      } else {
-        // result_index might overflow 32 bits, therefore keep a dedicated flag
-        // that we ran out of space.
-        atomicMax(result_overflow, 1);
-      }
+  // Only emit results above the threshold.
+  if (coeff > coeff_threshold) {
+    // Reserve a result slot atomically to avoid collisions.
+    const uint32_t reserved = atomicAdd(result_index, 1u);
+    if (reserved < max_results) {
+      KingResult &result = results[reserved];
+      result.sample_i = i;
+      result.sample_j = j;
+      result.coeff = coeff;
+    } else {
+      // result_index might overflow 32 bits, therefore keep a dedicated flag
+      // that we ran out of space.
+      atomicMax(result_overflow, 1);
     }
   }
 }
