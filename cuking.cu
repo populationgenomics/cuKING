@@ -218,7 +218,7 @@ __global__ void ComputeKingKernel(
     } else {
       // result_index might overflow 32 bits, therefore keep a dedicated flag
       // that we ran out of space.
-      atomicMax(result_overflow, 1);
+      atomicMax(result_overflow, 1u);
     }
   }
 }
