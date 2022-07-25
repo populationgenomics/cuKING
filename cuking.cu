@@ -184,9 +184,9 @@ __global__ void ComputeKingKernel(
   // The first thread in all other warps adds their reduced values to shared
   // memory.
   if (threadIdx.x > 0 && (threadIdx.x & (warpSize - 1)) == 0) {
-    // We use atomics to reduce the required amount of shared memory, to allow
-    // higher occupancy. It doesn't seem to make a difference performance-wise
-    // on an A100 though.
+    // We use atomics to reduce the shared memory requirements, theoretically
+    // allowing higher occupancy. It doesn't seem to make a difference
+    // performance-wise on an A100 though.
     atomicAdd(&shared_num_het_i, num_het_i);
     atomicAdd(&shared_num_het_j, num_het_j);
     atomicAdd(&shared_num_both_het, num_both_het);
@@ -399,13 +399,11 @@ absl::Status Run() {
     sample_ids.push_back(sample_id);
   }
 
-  // Use 4 full warps for maximized coalesced memory access. In order to have
-  // all threads active for partial reductions, pad the number of sites
-  // accordingly.
-  constexpr uint32_t kNumBlockThreads = 128;
+  // Pad the number of sites to the warp size, to make sure that all threads
+  // within a warp are active.
+  constexpr uint32_t kWarpSize = 32;
   const uint32_t num_sites =
-      CeilIntDiv(uint32_t(metadata["num_sites"]), kNumBlockThreads) *
-      kNumBlockThreads;
+      CeilIntDiv(uint32_t(metadata["num_sites"]), kWarpSize) * kWarpSize;
   metadata.clear();
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
@@ -619,6 +617,8 @@ absl::Status Run() {
   // use z as well.
   const dim3 num_blocks(num_samples, CeilIntDiv(num_samples, kMaxBlocksYZ),
                         std::min(num_samples, kMaxBlocksYZ));
+  // Use 4 full warps for maximized coalesced memory access.
+  constexpr uint32_t kNumBlockThreads = 4 * kWarpSize;
   ComputeKingKernel<<<num_blocks, kNumBlockThreads>>>(
       num_samples, words_per_sample, bit_set.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), max_results, results.get(),
