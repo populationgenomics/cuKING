@@ -36,7 +36,7 @@ ABSL_FLAG(size_t, num_reader_threads, 100,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
 ABSL_FLAG(
-    uint32_t, max_results, uint32_t(100) << 20,
+    uint32_t, max_results, uint32_t(10) << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
 ABSL_FLAG(
     float, king_coeff_threshold, 0.0884f,
@@ -107,14 +107,40 @@ CudaArray<T> NewCudaArray(const size_t size) {
   return CudaArray<T>(buffer, CudaArrayDeleter<T>());
 }
 
-__device__ float ComputeKing(const uint64_t *const het_i_entries,
-                             const uint64_t *const hom_alt_i_entries,
-                             const uint64_t *const het_j_entries,
-                             const uint64_t *const hom_alt_j_entries,
-                             const uint32_t num_entries) {
-  // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
+// Stores the KING coefficient for one pair of samples.
+struct KingResult {
+  uint32_t sample_i, sample_j;
+  float coeff;
+};
+
+// The maximum number of schedulable blocks in the y and z dimension.
+constexpr uint32_t kMaxBlocksYZ = 65535u;
+
+__global__ void ComputeKingKernel(
+    const uint32_t num_samples, const uint32_t words_per_sample,
+    const uint64_t *const bit_sets, const float coeff_threshold,
+    const uint32_t max_results, KingResult *const results,
+    uint32_t *const result_index, uint32_t *const result_overflow) {
+  // Compute the sample indices from the block index.
+  const uint64_t i = blockIdx.x;
+  const uint64_t j = uint64_t(blockIdx.y) * kMaxBlocksYZ + blockIdx.z;
+  if (i >= j || j >= num_samples) {
+    return;
+  }
+
+  // Determine the offsets for the bit set.
+  const uint32_t num_entries = words_per_sample / 2;
+  const uint64_t offset_i = i * words_per_sample;
+  const uint64_t offset_j = j * words_per_sample;
+  const uint64_t *const het_i_entries = bit_sets + offset_i;
+  const uint64_t *const hom_alt_i_entries = het_i_entries + num_entries;
+  const uint64_t *const het_j_entries = bit_sets + offset_j;
+  const uint64_t *const hom_alt_j_entries = het_j_entries + num_entries;
+
+  // Every thread compares a single entry for a contiguous memory block, to
+  // maximize coalesced reads. Stride over the full region.
   uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
-  for (uint32_t k = 0; k < num_entries; ++k) {
+  for (uint32_t k = threadIdx.x; k < num_entries; k += blockDim.x) {
     const uint64_t het_i = het_i_entries[k];
     const uint64_t hom_alt_i = hom_alt_i_entries[k];
     const uint64_t hom_ref_i = (~het_i) & (~hom_alt_i);
@@ -126,6 +152,7 @@ __device__ float ComputeKing(const uint64_t *const het_i_entries,
     // Only count sites where both genotypes are defined.
     const uint64_t missing_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
 
+    // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
     num_het_i += __popcll(het_i & missing_mask);
     num_het_j += __popcll(het_j & missing_mask);
     num_both_het += __popcll(het_i & het_j & missing_mask);
@@ -133,38 +160,53 @@ __device__ float ComputeKing(const uint64_t *const het_i_entries,
         ((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i)) & missing_mask);
   }
 
-  // Return the "between-family" estimator.
-  const uint32_t min_hets = num_het_i < num_het_j ? num_het_i : num_het_j;
-  return 0.5f +
-         (2.f * num_both_het - 4.f * num_opposing_hom - num_het_i - num_het_j) /
-             (4.f * min_hets);
-}
-
-// Stores the KING coefficient for one pair of samples.
-struct KingResult {
-  uint32_t sample_i, sample_j;
-  float coeff;
-};
-
-__global__ void ComputeKingKernel(
-    const uint32_t num_samples, const uint32_t words_per_sample,
-    const uint64_t *const bit_sets, const float coeff_threshold,
-    const uint32_t max_results, KingResult *const results,
-    uint32_t *const result_index, uint32_t *const result_overflow) {
-  const uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t i = index / num_samples;
-  const uint64_t j = index % num_samples;
-  if (i >= num_samples || i >= j) {
-    return;
+  // Perform a warp-wide partial reduction.
+  // See https://developer.nvidia.com/blog/faster-parallel-reductions-kepler.
+  const uint32_t shfl_mask = warpSize - 1;  // All threads are participating.
+  for (uint32_t delta = warpSize / 2; delta > 0; delta /= 2) {
+    num_het_i += __shfl_down_sync(shfl_mask, num_het_i, delta);
+    num_het_j += __shfl_down_sync(shfl_mask, num_het_j, delta);
+    num_both_het += __shfl_down_sync(shfl_mask, num_both_het, delta);
+    num_opposing_hom += __shfl_down_sync(shfl_mask, num_opposing_hom, delta);
   }
 
-  const uint32_t num_entries = words_per_sample / 2;
-  const uint64_t offset_i = i * words_per_sample;
-  const uint64_t offset_j = j * words_per_sample;
-  const float coeff = ComputeKing(
-      bit_sets + offset_i, bit_sets + offset_i + num_entries,
-      bit_sets + offset_j, bit_sets + offset_j + num_entries, num_entries);
+  // The first thread initializes the shared memory.
+  static __shared__ uint32_t shared_num_het_i, shared_num_het_j,
+      shared_num_both_het, shared_num_opposing_hom;
+  if (threadIdx.x == 0) {
+    shared_num_het_i = num_het_i;
+    shared_num_het_j = num_het_j;
+    shared_num_both_het = num_both_het;
+    shared_num_opposing_hom = num_opposing_hom;
+  }
+  __syncthreads();
 
+  // The first thread in all other warps adds their reduced values to shared
+  // memory.
+  if (threadIdx.x > 0 && (threadIdx.x & (warpSize - 1)) == 0) {
+    // We use atomics to reduce the shared memory requirements, theoretically
+    // allowing higher occupancy. It doesn't seem to make a difference
+    // performance-wise on an A100 though.
+    atomicAdd(&shared_num_het_i, num_het_i);
+    atomicAdd(&shared_num_het_j, num_het_j);
+    atomicAdd(&shared_num_both_het, num_both_het);
+    atomicAdd(&shared_num_opposing_hom, num_opposing_hom);
+  }
+  __syncthreads();
+
+  // The first thread computes the final value, corresponding to the
+  // "between-family" estimator.
+  if (threadIdx.x != 0) {
+    return;
+  }
+  const uint32_t min_hets =
+      shared_num_het_i < shared_num_het_j ? shared_num_het_i : shared_num_het_j;
+  const float coeff =
+      0.5f + (2.f * shared_num_both_het - 4.f * shared_num_opposing_hom -
+              shared_num_het_i - shared_num_het_j) /
+                 (4.f * min_hets);
+
+  // Only emit results above the threshold.
   if (coeff > coeff_threshold) {
     // Reserve a result slot atomically to avoid collisions.
     const uint32_t reserved = atomicAdd(result_index, 1u);
@@ -176,7 +218,7 @@ __global__ void ComputeKingKernel(
     } else {
       // result_index might overflow 32 bits, therefore keep a dedicated flag
       // that we ran out of space.
-      atomicMax(result_overflow, 1);
+      atomicMax(result_overflow, 1u);
     }
   }
 }
@@ -356,26 +398,31 @@ absl::Status Run() {
   for (const auto &sample_id : metadata_samples) {
     sample_ids.push_back(sample_id);
   }
-  const size_t num_sites = metadata["num_sites"];
+
+  // Pad the number of sites to the warp size, to make sure that all threads
+  // within a warp are active.
+  constexpr uint32_t kWarpSize = 32;
+  const uint32_t num_sites =
+      CeilIntDiv(uint32_t(metadata["num_sites"]), kWarpSize) * kWarpSize;
   metadata.clear();
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
   // Allocate the memory required for the bit sets. To tranpose the Hail
-  // MatrixTable, we concatenate each sample's genotypes across all partitions,
-  // storing the results sequentially in a bit set. Each sample gets its own set
-  // of words in the bit set, to facilitate comparing any two samples. Each
-  // genotype is split into two bits (is_het followed by is_hom_var for each
-  // sample), in distinct bit sets.
-  const size_t words_per_sample = 2 * CeilIntDiv(num_sites, size_t(64));
-  const size_t bit_set_size = words_per_sample * num_samples;
+  // MatrixTable, we concatenate each sample's genotypes across all
+  // partitions, storing the results sequentially in a bit set. Each sample
+  // gets its own set of words in the bit set, to facilitate comparing any two
+  // samples. Each genotype is split into two bits (is_het followed by
+  // is_hom_var for each sample), in distinct bit sets.
+  const uint32_t words_per_sample = 2 * CeilIntDiv(num_sites, uint32_t(64));
+  const size_t bit_set_size = size_t(words_per_sample) * num_samples;
   std::cout << "Allocating "
             << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
             << " MiB of memory for bit set...";
   std::cout.flush();
   auto bit_set = NewCudaArray<uint64_t>(bit_set_size);
-  // We initialize all bits to 1 as that indicates a missing value (i.e. is_het
-  // and is_hom_var are both set). That's why below we only ever have to clear
-  // bits (AtomicClearBit).
+  // We initialize all bits to 1 as that indicates a missing value (i.e.
+  // is_het and is_hom_var are both set). That's why below we only ever have
+  // to clear bits (AtomicClearBit).
   memset(bit_set.get(), 0xFF, bit_set_size * sizeof(uint64_t));
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
@@ -433,9 +480,9 @@ absl::Status Run() {
               file_metadata->num_columns(), " in ", input_file.first));
         }
 
-        // Decompress all columns into memory, this way it's easier to process a
-        // full row afterwards. We expect the following schema: row_idx(INT64),
-        // col_idx(INT64), n_alt_alleles(INT32).
+        // Decompress all columns into memory, this way it's easier to process
+        // a full row afterwards. We expect the following schema:
+        // row_idx(INT64), col_idx(INT64), n_alt_alleles(INT32).
         const size_t num_rows = file_metadata->num_rows();
         std::vector<int64_t> row_idx_buffer, col_idx_buffer;
         std::vector<int32_t> n_alt_alleles_buffer;
@@ -564,10 +611,15 @@ absl::Status Run() {
 
   std::cout << "Running KING CUDA kernel for " << num_samples << " samples...";
   std::cout.flush();
-  constexpr uint64_t kCudaBlockSize = 1024;
-  const uint64_t kNumCudaBlocks =
-      CeilIntDiv(uint64_t(num_samples) * num_samples, kCudaBlockSize);
-  ComputeKingKernel<<<kNumCudaBlocks, kCudaBlockSize>>>(
+  // We treat each sample pair as a block. Unfortunately the number of blocks
+  // in the y dimension is restricted to 2^16 - 1 = 65535, so we can't
+  // directly map the sample pair index to the x and y dimensions, but must
+  // use z as well.
+  const dim3 num_blocks(num_samples, CeilIntDiv(num_samples, kMaxBlocksYZ),
+                        std::min(num_samples, kMaxBlocksYZ));
+  // Use 4 full warps for maximized coalesced memory access.
+  constexpr uint32_t kNumBlockThreads = 4 * kWarpSize;
+  ComputeKingKernel<<<num_blocks, kNumBlockThreads>>>(
       num_samples, words_per_sample, bit_set.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), max_results, results.get(),
       &result_index_and_flag[0], &result_index_and_flag[1]);
