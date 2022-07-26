@@ -156,10 +156,17 @@ class Submatrix {
     return (i_begin_ == j_begin_) ? NumRows() : (NumRows() + NumCols());
   }
 
+  // Returns whether this submatrix contains the given sample.
+  __host__ __device__ uint32_t Contains(const uint32_t index) const {
+    return (i_begin_ <= index && index < i_end_) ||
+           (j_begin_ <= index && index < j_end_);
+  }
+
   // Returns the linear offset for a sample index.
-  __host__ __device__ uint32_t SampleOffset(const uint32_t i) const {
+  __host__ __device__ uint32_t SampleOffset(const uint32_t index) const {
     // i_begin_..i_end_ is stored before j_begin_..j_end_.
-    return (i < i_end_) ? (i - i_begin_) : (i_end_ - i_begin_ + i - j_begin_);
+    return (index < i_end_) ? (index - i_begin_)
+                            : (i_end_ - i_begin_ + index - j_begin_);
   }
 
  private:
@@ -631,8 +638,11 @@ absl::Status Run() {
 
         // Update the bit set now that the whole table is in memory.
         for (size_t row = 0; row < num_rows; ++row) {
-          const int32_t row_idx = row_idx_buffer[row];
           const int32_t col_idx = col_idx_buffer[row];
+          if (!submatrix.Contains(col_idx)) {
+            continue;  // Skip any samples that are not relevant for this shard.
+          }
+          const int32_t row_idx = row_idx_buffer[row];
           const int32_t n_alt_alleles = n_alt_alleles_buffer[row];
           // Pointers to the beginning of the bit set for this sample.
           uint64_t *const is_het_ptr =
@@ -679,7 +689,7 @@ absl::Status Run() {
 
   const uint32_t num_rows = submatrix.NumRows();
   const uint32_t num_cols = submatrix.NumCols();
-  std::cout << "Running KING CUDA kernel for " << num_rows << "x" << num_cols
+  std::cout << "Running KING CUDA kernel for " << num_rows << " x " << num_cols
             << " matrix...";
   std::cout.flush();
   // We treat each sample pair as a block. Unfortunately the number of blocks
