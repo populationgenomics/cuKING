@@ -42,13 +42,12 @@ ABSL_FLAG(
     float, king_coeff_threshold, 0.0884f,
     "Only store coefficients larger than this threshold. Defaults to 2nd "
     "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
-ABSL_FLAG(
-    uint32_t, split_factor, 1,
-    "The factor used to split the relatedness matrix into submatrices for sharding.");
-ABSL_FLAG(
-    uint32_t, shard_index, 0,
-    "The shard index, only used when split_factor > 1. "
-    "The index must be in [0, split_factor * (split_factor + 1) / 2).");
+ABSL_FLAG(uint32_t, split_factor, 1,
+          "The factor used to split the relatedness matrix into submatrices "
+          "for sharding.");
+ABSL_FLAG(uint32_t, shard_index, 0,
+          "The shard index, only used when split_factor > 1. "
+          "The index must be in [0, split_factor * (split_factor + 1) / 2).");
 
 namespace {
 
@@ -114,6 +113,60 @@ CudaArray<T> NewCudaArray(const size_t size) {
   return CudaArray<T>(buffer, CudaArrayDeleter<T>());
 }
 
+// Returns ceil(a / b) for integers a, b.
+template <typename T>
+inline T CeilIntDiv(const T a, const T b) {
+  return (a + b - 1) / b;
+}
+
+// Bounds the relatedness submatrix to compute results for.
+class Submatrix {
+ public:
+  Submatrix(const uint32_t num_samples, const uint32_t split_factor,
+            const uint32_t shard_index) {
+    // First, determine which submatrix this shard corresponds to, by mapping
+    // the linear index for an upper triangular matrix to its 2d coordinate.
+    // There are closed form solutions for this, but they're tricky numerically
+    // (https://stackoverflow.com/questions/27086195/linear-index-upper-triangular-matrix).
+    uint32_t tri_sum = 0, block_i = 0, block_j = 0;
+    for (uint32_t i = 0; i < split_factor; ++i) {
+      tri_sum += split_factor - i;
+      if (shard_index < tri_sum) {
+        block_i = i;
+        block_j = split_factor - tri_sum + shard_index;
+        break;
+      }
+    }
+
+    // Compute the submatrix bounds, based on the block size.
+    const uint32_t size = CeilIntDiv(num_samples, split_factor);
+    i_begin_ = block_i * size;
+    i_end_ = std::min(i_begin_ + size, num_samples);
+    j_begin_ = block_j * size;
+    j_end_ = std::min(j_begin_ + size, num_samples);
+  }
+
+  __host__ __device__ uint32_t NumRows() const { return i_end_ - i_begin_; }
+
+  __host__ __device__ uint32_t NumCols() const { return j_end_ - j_begin_; }
+
+  // Returns how many samples need to be stored for this submatrix.
+  __host__ __device__ uint32_t NumSamples() const {
+    // Use only half the storage if the ranges are identical.
+    return (i_begin_ == j_begin_) ? NumRows() : (NumRows() + NumCols());
+  }
+
+  // Returns the linear offset for a sample index.
+  __host__ __device__ uint32_t SampleOffset(const uint32_t i) const {
+    // i_begin_..i_end_ is stored before j_begin_..j_end_.
+    return (i < i_end_) ? (i - i_begin_) : (i_end_ - i_begin_ + i - j_begin_);
+  }
+
+ private:
+  uint32_t i_begin_, i_end_;  // Sample row range.
+  uint32_t j_begin_, j_end_;  // Sample column range.
+};
+
 // Stores the KING coefficient for one pair of samples.
 struct KingResult {
   uint32_t sample_i, sample_j;
@@ -124,21 +177,21 @@ struct KingResult {
 constexpr uint32_t kMaxBlocksYZ = 65535u;
 
 __global__ void ComputeKingKernel(
-    const uint32_t num_samples, const uint32_t words_per_sample,
+    const Submatrix submatrix, const uint32_t words_per_sample,
     const uint64_t *const bit_sets, const float coeff_threshold,
     const uint32_t max_results, KingResult *const results,
     uint32_t *const result_index, uint32_t *const result_overflow) {
   // Compute the sample indices from the block index.
   const uint64_t i = blockIdx.x;
   const uint64_t j = uint64_t(blockIdx.y) * kMaxBlocksYZ + blockIdx.z;
-  if (i >= j || j >= num_samples) {
+  if (i >= j || j >= submatrix.NumCols()) {
     return;
   }
 
   // Determine the offsets for the bit set.
   const uint32_t num_entries = words_per_sample / 2;
-  const uint64_t offset_i = i * words_per_sample;
-  const uint64_t offset_j = j * words_per_sample;
+  const uint64_t offset_i = submatrix.SampleOffset(i) * words_per_sample;
+  const uint64_t offset_j = submatrix.SampleOffset(j) * words_per_sample;
   const uint64_t *const het_i_entries = bit_sets + offset_i;
   const uint64_t *const hom_alt_i_entries = het_i_entries + num_entries;
   const uint64_t *const het_j_entries = bit_sets + offset_j;
@@ -201,27 +254,6 @@ __global__ void ComputeKingKernel(
   }
   __syncthreads();
 
-<<<<<<< HEAD
-__global__ void ComputeKingKernel(
-    const uint32_t num_samples, const uint32_t words_per_sample,
-    const uint64_t *const bit_set, const float coeff_threshold,
-    const uint32_t max_results, KingResult *const results,
-    uint32_t *const result_index, uint32_t *const result_overflow) {
-  const uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t i = index / num_samples;
-  const uint64_t j = index % num_samples;
-  if (i >= num_samples || i >= j) {
-    return;
-  }
-
-  const uint32_t num_entries = words_per_sample / 2;
-  const uint64_t offset_i = i * words_per_sample;
-  const uint64_t offset_j = j * words_per_sample;
-  const float coeff = ComputeKing(
-      bit_set + offset_i, bit_set + offset_i + num_entries,
-      bit_set + offset_j, bit_set + offset_j + num_entries, num_entries);
-
-=======
   // The first thread computes the final value, corresponding to the
   // "between-family" estimator.
   if (threadIdx.x != 0) {
@@ -235,7 +267,6 @@ __global__ void ComputeKingKernel(
                  (4.f * min_hets);
 
   // Only emit results above the threshold.
->>>>>>> main
   if (coeff > coeff_threshold) {
     // Reserve a result slot atomically to avoid collisions.
     const uint32_t reserved = atomicAdd(result_index, 1u);
@@ -259,12 +290,6 @@ inline void AtomicClearBit(uint64_t *const bit_set, uint64_t index) {
   // relaxed memory ordering as bit set values don't depend on one another.
   __atomic_and_fetch(ptr, ~(uint64_t(1) << (index & size_t(63))),
                      __ATOMIC_RELAXED);
-}
-
-// Returns ceil(a / b) for integers a, b.
-template <typename T>
-inline T CeilIntDiv(const T a, const T b) {
-  return (a + b - 1) / b;
 }
 
 // Keeps track of time intervals.
@@ -446,6 +471,9 @@ absl::Status Run() {
   metadata.clear();
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
+  // Determine the submatrix to process, based on the split factor.
+  const Submatrix submatrix(num_samples, split_factor, shard_index);
+
   // Allocate the memory required for the bit sets. To tranpose the Hail
   // MatrixTable, we concatenate each sample's genotypes across all
   // partitions, storing the results sequentially in a bit set. Each sample
@@ -453,7 +481,7 @@ absl::Status Run() {
   // samples. Each genotype is split into two bits (is_het followed by
   // is_hom_var for each sample), in distinct bit sets.
   const uint32_t words_per_sample = 2 * CeilIntDiv(num_sites, uint32_t(64));
-  const size_t bit_set_size = size_t(words_per_sample) * num_samples;
+  const size_t bit_set_size = size_t(words_per_sample) * submatrix.NumSamples();
   std::cout << "Allocating "
             << CeilIntDiv(bit_set_size * sizeof(uint64_t), size_t(1) << 20)
             << " MiB of memory for bit set...";
@@ -608,7 +636,8 @@ absl::Status Run() {
           const int32_t n_alt_alleles = n_alt_alleles_buffer[row];
           // Pointers to the beginning of the bit set for this sample.
           uint64_t *const is_het_ptr =
-              bit_set.get() + col_idx * words_per_sample;
+              bit_set.get() +
+              submatrix.SampleOffset(col_idx) * words_per_sample;
           uint64_t *const is_hom_var_ptr = is_het_ptr + words_per_sample / 2;
           switch (n_alt_alleles) {
             case 0:  // hom-ref
@@ -648,18 +677,21 @@ absl::Status Run() {
   result_index_and_flag[0] = result_index_and_flag[1] = 0;
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
 
-  std::cout << "Running KING CUDA kernel for " << num_samples << " samples...";
+  const uint32_t num_rows = submatrix.NumRows();
+  const uint32_t num_cols = submatrix.NumCols();
+  std::cout << "Running KING CUDA kernel for " << num_rows << "x" << num_cols
+            << " matrix...";
   std::cout.flush();
   // We treat each sample pair as a block. Unfortunately the number of blocks
   // in the y dimension is restricted to 2^16 - 1 = 65535, so we can't
   // directly map the sample pair index to the x and y dimensions, but must
   // use z as well.
-  const dim3 num_blocks(num_samples, CeilIntDiv(num_samples, kMaxBlocksYZ),
-                        std::min(num_samples, kMaxBlocksYZ));
+  const dim3 num_blocks(num_rows, CeilIntDiv(num_cols, kMaxBlocksYZ),
+                        std::min(num_cols, kMaxBlocksYZ));
   // Use 4 full warps for maximized coalesced memory access.
   constexpr uint32_t kNumBlockThreads = 4 * kWarpSize;
   ComputeKingKernel<<<num_blocks, kNumBlockThreads>>>(
-      num_samples, words_per_sample, bit_set.get(),
+      submatrix, words_per_sample, bit_set.get(),
       absl::GetFlag(FLAGS_king_coeff_threshold), max_results, results.get(),
       &result_index_and_flag[0], &result_index_and_flag[1]);
 
