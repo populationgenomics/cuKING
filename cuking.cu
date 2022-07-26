@@ -189,16 +189,18 @@ __global__ void ComputeKingKernel(
     const uint32_t max_results, KingResult *const results,
     uint32_t *const result_index, uint32_t *const result_overflow) {
   // Compute the sample indices from the block index.
-  const uint64_t i = blockIdx.x;
-  const uint64_t j = uint64_t(blockIdx.y) * kMaxBlocksYZ + blockIdx.z;
+  const uint32_t i = blockIdx.x;
+  const uint32_t j = blockIdx.y * kMaxBlocksYZ + blockIdx.z;
   if (i >= j || j >= submatrix.NumCols()) {
     return;
   }
 
   // Determine the offsets for the bit set.
   const uint32_t num_entries = words_per_sample / 2;
-  const uint64_t offset_i = submatrix.SampleOffset(i) * words_per_sample;
-  const uint64_t offset_j = submatrix.SampleOffset(j) * words_per_sample;
+  const uint64_t offset_i =
+      uint64_t(submatrix.SampleOffset(i)) * words_per_sample;
+  const uint64_t offset_j =
+      uint64_t(submatrix.SampleOffset(j)) * words_per_sample;
   const uint64_t *const het_i_entries = bit_sets + offset_i;
   const uint64_t *const hom_alt_i_entries = het_i_entries + num_entries;
   const uint64_t *const het_j_entries = bit_sets + offset_j;
@@ -647,7 +649,7 @@ absl::Status Run() {
           // Pointers to the beginning of the bit set for this sample.
           uint64_t *const is_het_ptr =
               bit_set.get() +
-              submatrix.SampleOffset(col_idx) * words_per_sample;
+              uint64_t(submatrix.SampleOffset(col_idx)) * words_per_sample;
           uint64_t *const is_hom_var_ptr = is_het_ptr + words_per_sample / 2;
           switch (n_alt_alleles) {
             case 0:  // hom-ref
