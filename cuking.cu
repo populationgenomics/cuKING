@@ -739,14 +739,14 @@ absl::Status Run() {
   // i (sample1, string), j (sample2, string), phi (KING coefficient, float).
   parquet::schema::NodeVector schema_fields;
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
-      "i", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
-      parquet::ConvertedType::UTF8));
+      "i", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
+      parquet::Type::BYTE_ARRAY));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
-      "j", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
-      parquet::ConvertedType::UTF8));
+      "j", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
+      parquet::Type::BYTE_ARRAY));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
-      "phi", parquet::Repetition::REQUIRED, parquet::Type::FLOAT,
-      parquet::ConvertedType::NONE));
+      "phi", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
+      parquet::Type::FLOAT));
   const auto schema = std::static_pointer_cast<parquet::schema::GroupNode>(
       parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED,
                                        schema_fields));
@@ -755,7 +755,8 @@ absl::Status Run() {
   ASSIGN_OR_RETURN(auto buffer_output_stream,
                    arrow::io::BufferOutputStream::Create());
   parquet::WriterProperties::Builder writer_builder;
-  writer_builder.compression(parquet::Compression::ZSTD);
+  // Hail's libhadoop doesn't support ZSTD.
+  writer_builder.compression(parquet::Compression::SNAPPY);
   std::shared_ptr<parquet::WriterProperties> writer_props =
       writer_builder.build();
   std::shared_ptr<parquet::ParquetFileWriter> parquet_writer =
@@ -800,7 +801,7 @@ absl::Status Run() {
   // instead.
   std::ostringstream output_path_ss;
   output_path_ss << output_bucket_and_path.second << "/part-" << std::setw(5)
-                 << std::setfill('0') << shard_index << ".zstd.parquet";
+                 << std::setfill('0') << shard_index << ".snappy.parquet";
   ASSIGN_OR_RETURN(
       const auto output_metadata,
       gcs_client.InsertObject(std::string(output_bucket_and_path.first),
