@@ -740,10 +740,10 @@ absl::Status Run() {
   parquet::schema::NodeVector schema_fields;
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "i", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
-      parquet::ConvertedType::NONE));
+      parquet::ConvertedType::UTF8));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "j", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
-      parquet::ConvertedType::NONE));
+      parquet::ConvertedType::UTF8));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "phi", parquet::Repetition::REQUIRED, parquet::Type::FLOAT,
       parquet::ConvertedType::NONE));
