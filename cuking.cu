@@ -126,8 +126,7 @@ inline T CeilIntDiv(const T a, const T b) {
 }
 
 // Bounds the relatedness submatrix to compute results for.
-class Submatrix {
- public:
+struct Submatrix {
   Submatrix(const uint32_t num_samples, const uint32_t split_factor,
             const uint32_t shard_index) {
     // First, determine which submatrix this shard corresponds to, by mapping
@@ -146,38 +145,37 @@ class Submatrix {
 
     // Compute the submatrix bounds, based on the block size.
     const uint32_t size = CeilIntDiv(num_samples, split_factor);
-    i_begin_ = block_i * size;
-    i_end_ = std::min(i_begin_ + size, num_samples);
-    j_begin_ = block_j * size;
-    j_end_ = std::min(j_begin_ + size, num_samples);
+    i_begin = block_i * size;
+    i_end_ = std::min(i_begin + size, num_samples);
+    j_begin = block_j * size;
+    j_end_ = std::min(j_begin + size, num_samples);
   }
 
-  __host__ __device__ uint32_t NumRows() const { return i_end_ - i_begin_; }
+  __host__ __device__ uint32_t NumRows() const { return i_end_ - i_begin; }
 
-  __host__ __device__ uint32_t NumCols() const { return j_end_ - j_begin_; }
+  __host__ __device__ uint32_t NumCols() const { return j_end_ - j_begin; }
 
   // Returns how many samples need to be stored for this submatrix.
   __host__ __device__ uint32_t NumSamples() const {
     // Use only half the storage if the ranges are identical.
-    return (i_begin_ == j_begin_) ? NumRows() : (NumRows() + NumCols());
+    return (i_begin == j_begin) ? NumRows() : (NumRows() + NumCols());
   }
 
   // Returns whether this submatrix contains the given sample.
   __host__ __device__ uint32_t Contains(const uint32_t index) const {
-    return (i_begin_ <= index && index < i_end_) ||
-           (j_begin_ <= index && index < j_end_);
+    return (i_begin <= index && index < i_end_) ||
+           (j_begin <= index && index < j_end_);
   }
 
   // Returns the linear offset for a sample index.
   __host__ __device__ uint32_t SampleOffset(const uint32_t index) const {
-    // i_begin_..i_end_ is stored before j_begin_..j_end_.
-    return (index < i_end_) ? (index - i_begin_)
-                            : (i_end_ - i_begin_ + index - j_begin_);
+    // i_begin..i_end_ is stored before j_begin..j_end_.
+    return (index < i_end_) ? (index - i_begin)
+                            : (i_end_ - i_begin + index - j_begin);
   }
 
- private:
-  uint32_t i_begin_, i_end_;  // Sample row range.
-  uint32_t j_begin_, j_end_;  // Sample column range.
+  uint32_t i_begin, i_end_;  // Sample row range.
+  uint32_t j_begin, j_end_;  // Sample column range.
 };
 
 // Stores the KING coefficient for one pair of samples.
@@ -195,9 +193,9 @@ __global__ void ComputeKingKernel(
     const uint32_t max_results, KingResult *const results,
     uint32_t *const result_index, uint32_t *const result_overflow) {
   // Compute the sample indices from the block index.
-  const uint32_t i = blockIdx.x;
-  const uint32_t j = blockIdx.y * kMaxBlocksYZ + blockIdx.z;
-  if (i >= j || j >= submatrix.NumCols()) {
+  const uint32_t i = submatrix.i_begin + blockIdx.x;
+  const uint32_t j = submatrix.j_begin + blockIdx.y * kMaxBlocksYZ + blockIdx.z;
+  if (i >= j || !submatrix.Contains(j)) {
     return;
   }
 
