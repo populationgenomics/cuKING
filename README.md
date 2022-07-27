@@ -107,3 +107,5 @@ If the number of samples and sites is so large that they won't fit into the memo
 For example, to halve memory requirements, the full matrix can be split into $4 \cdot 4 = 16$ equally sized submatrices (i.e. a "split factor" of 4). Only the "upper triangular" submatrices need to be evaluated due to symmetry of relatedness, leading to 10 shards.
 
 Sharding is implemented through two parameters, `--split_factor` ($k$) and `--shard_index` ($i$), with $0 \leq i < \frac{k(k + 1)}{2}$.
+
+Each shard corresponds to a separate Parquet output partition, so results can easily be combined afterwards.
