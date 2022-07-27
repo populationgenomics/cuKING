@@ -87,7 +87,7 @@ gcloud beta batch jobs submit cuking-gnomad-v4 \
     --script-text="sudo docker run --name cuking --gpus all
     us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest cuking
     --input_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_packed.parquet
-    --output_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.json
+    --output_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.parquet
     --king_coeff_threshold=0.05
     --requester_pays_project=cpg-gnomad-production-27bb"
 ```
