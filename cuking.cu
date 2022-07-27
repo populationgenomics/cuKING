@@ -10,6 +10,7 @@
 #include <absl/time/time.h>
 #include <arrow/io/memory.h>
 #include <google/cloud/storage/client.h>
+#include <parquet/api/writer.h>
 #include <parquet/column_reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
@@ -25,10 +26,10 @@
 
 ABSL_FLAG(std::string, input_uri, "",
           "GCS URI containing the packed Parquet tables, e.g. "
-          "gs://some/bucket/my_table.parquet");
+          "gs://some/bucket/input.parquet");
 ABSL_FLAG(std::string, output_uri, "",
-          "The sparse relatedness matrix JSON output GCS URI, e.g. "
-          "gs://some/bucket/relatedness.json");
+          "GCS URI to write the Parquet table results to, e.g. "
+          "gs://some/bucket/output.parquet");
 ABSL_FLAG(
     std::string, requester_pays_project, "",
     "The user project to use for accessing Requester Pays buckets on GCS.");
@@ -47,7 +48,8 @@ ABSL_FLAG(uint32_t, split_factor, 1,
           "for sharding.");
 ABSL_FLAG(uint32_t, shard_index, 0,
           "The shard index, only used when split_factor > 1. "
-          "The index must be in [0, split_factor * (split_factor + 1) / 2).");
+          "The index must be in [0, split_factor * (split_factor + 1) / 2). "
+          "Every shard will write a distinct Parquet partition.");
 
 namespace {
 
@@ -59,6 +61,10 @@ inline absl::Status ToAbslStatus(absl::Status status) {
 
 inline absl::Status ToAbslStatus(const google::cloud::Status &status) {
   return absl::UnknownError(status.message());
+}
+
+absl::Status ToAbslStatus(const arrow::Status &status) {
+  return absl::UnknownError(status.ToString());
 }
 
 // Unfortunately these status macros are still not part of Abseil. This is
@@ -720,23 +726,87 @@ absl::Status Run() {
   const uint32_t num_results = result_index_and_flag[0];
   std::cout << "Processing " << num_results << " results...";
   std::cout.flush();
+
   // Free some memory for postprocessing.
   bit_set.reset();
-  // Create a map for JSON serialization.
-  absl::flat_hash_map<std::string_view,
-                      absl::flat_hash_map<std::string_view, float>>
-      result_map;
-  for (uint32_t i = 0; i < num_results; ++i) {
-    const auto &result = results[i];
-    result_map[sample_ids[result.sample_i]][sample_ids[result.sample_j]] =
-        result.coeff;
+
+  // Sort results to enable better columnar compression.
+  std::sort(results.get(), results.get() + num_results,
+            [](const KingResult &lhs, const KingResult &rhs) {
+              return std::tie(lhs.sample_i, lhs.sample_j, lhs.coeff) <
+                     std::tie(rhs.sample_i, rhs.sample_j, rhs.coeff);
+            });
+
+  // Define the output table schema:
+  // i (sample1, string), j (sample2, string), phi (KING coefficient, float).
+  parquet::schema::NodeVector schema_fields;
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "i", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+      parquet::ConvertedType::NONE));
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "j", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY,
+      parquet::ConvertedType::NONE));
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "phi", parquet::Repetition::REQUIRED, parquet::Type::FLOAT,
+      parquet::ConvertedType::NONE));
+  const auto schema = std::static_pointer_cast<parquet::schema::GroupNode>(
+      parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED,
+                                       schema_fields));
+
+  // Write to an in-memory buffer before storing the result as a GCS blob.
+  ASSIGN_OR_RETURN(auto buffer_output_stream,
+                   arrow::io::BufferOutputStream::Create());
+  parquet::WriterProperties::Builder writer_builder;
+  writer_builder.compression(parquet::Compression::ZSTD);
+  std::shared_ptr<parquet::WriterProperties> writer_props =
+      writer_builder.build();
+  std::shared_ptr<parquet::ParquetFileWriter> parquet_writer =
+      parquet::ParquetFileWriter::Open(buffer_output_stream, schema,
+                                       writer_props);
+  parquet::RowGroupWriter *const row_group_writer =
+      parquet_writer->AppendRowGroup();
+
+  {  // i (string)
+    parquet::ByteArrayWriter *const col_writer =
+        static_cast<parquet::ByteArrayWriter *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      const auto &s = sample_ids[results[i].sample_i];
+      const parquet::ByteArray value(
+          s.length(), reinterpret_cast<const uint8_t *>(s.data()));
+      col_writer->WriteBatch(1, nullptr, nullptr, &value);
+    }
+  }
+  {  // j (string)
+    parquet::ByteArrayWriter *const col_writer =
+        static_cast<parquet::ByteArrayWriter *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      const auto &s = sample_ids[results[i].sample_j];
+      const parquet::ByteArray value(
+          s.length(), reinterpret_cast<const uint8_t *>(s.data()));
+      col_writer->WriteBatch(1, nullptr, nullptr, &value);
+    }
+  }
+  {  // phi (float)
+    parquet::FloatWriter *const col_writer =
+        static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].coeff);
+    }
   }
 
+  parquet_writer->Close();
+  ASSIGN_OR_RETURN(const auto output_buffer, buffer_output_stream->Finish());
+
+  // Write to GCS, using the shard index as the partition index. Unfortunately,
+  // using absl::StrFormat leads to a compiler error, so use std::ostringstream
+  // instead.
+  std::ostringstream output_path_ss;
+  output_path_ss << output_bucket_and_path.second << "/part-" << std::setw(5)
+                 << std::setfill('0') << shard_index << ".zstd.parquet";
   ASSIGN_OR_RETURN(
       const auto output_metadata,
       gcs_client.InsertObject(std::string(output_bucket_and_path.first),
-                              std::string(output_bucket_and_path.second),
-                              nlohmann::json(result_map).dump(),
+                              output_path_ss.str(), output_buffer->ToString(),
                               requester_pays_project));
 
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
