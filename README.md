@@ -109,3 +109,21 @@ For example, to halve memory requirements, the full matrix can be split into $4 
 Sharding is implemented through two parameters, `--split_factor` ($k$) and `--shard_index` ($i$), with $0 \leq i < \frac{k(k + 1)}{2}$.
 
 Each shard corresponds to a separate Parquet output partition, so results can easily be combined afterwards.
+
+## Downstream analysis
+
+To import the results in Hail and prune samples based on relatedness, run the following:
+
+```python
+import hail as hl
+from hail.utils.java import Env
+
+hl.init(default_reference='GRCh38')
+
+spark = Env.spark_session()
+df = spark.read.parquet('gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.parquet')
+ht = hl.Table.from_spark(df)
+
+pairs = ht.filter(ht.phi > 0.1)
+related_samples_to_remove = hl.maximal_independent_set(pairs.i, pairs.j, False)
+```
