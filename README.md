@@ -69,7 +69,6 @@ gcloud compute instance-templates create cuking-instance-template \
     --no-restart-on-failure \
     --maintenance-policy=TERMINATE \
     --provisioning-model=SPOT \
-    --instance-termination-action=DELETE \
     --service-account=cuking@cpg-gnomad-production-27bb.iam.gserviceaccount.com \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --accelerator=count=1,type=nvidia-tesla-a100 \
