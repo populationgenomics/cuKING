@@ -302,7 +302,10 @@ __global__ void ComputeKingKernel(
       result.sample_j = j;
       result.kin = kin;
       result.ibs0 = float(shared_num_opposing_hom) / shared_num_shared_sites;
-      result.ibs2 = float(shared_num_concordant_hom) / shared_num_shared_sites;
+      // IBS2 also counts shared hets (see
+      // https://github.com/brentp/somalier/blob/cd2162906fd6ffe0a4b3bdf3e1b55c0f949cf342/src/somalierpkg/bitset.nim#L29).
+      result.ibs2 = float(shared_num_concordant_hom + shared_num_both_het) /
+                    shared_num_shared_sites;
     } else {
       // result_index might overflow 32 bits, therefore keep a dedicated flag
       // that we ran out of space.
