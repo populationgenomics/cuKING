@@ -66,9 +66,8 @@ gcloud compute instance-templates create cuking-instance-template \
     --machine-type=a2-highgpu-1g \
     --network-interface=network=default,network-tier=PREMIUM,address="" \
     --metadata-from-file=startup-script=instance_startup_script.sh \
-    --no-restart-on-failure \
     --maintenance-policy=TERMINATE \
-    --provisioning-model=SPOT \
+    --provisioning-model=STANDARD \
     --service-account=cuking@cpg-gnomad-production-27bb.iam.gserviceaccount.com \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --accelerator=count=1,type=nvidia-tesla-a100 \
