@@ -40,9 +40,9 @@ ABSL_FLAG(
     uint32_t, max_results, uint32_t(10) << 20,
     "How many coefficients for related sample pairs to reserve memory for.");
 ABSL_FLAG(
-    float, king_coeff_threshold, 0.0884f,
-    "Only store coefficients larger than this threshold. Defaults to 2nd "
-    "degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
+    float, kin_threshold, 0.0884f,
+    "Only store kinship coefficients larger than this threshold. Defaults to "
+    "2nd degree or closer (see https://www.kingrelatedness.com/manual.shtml).");
 ABSL_FLAG(uint32_t, split_factor, 1,
           "The factor used to split the relatedness matrix into submatrices "
           "for sharding.");
@@ -181,7 +181,7 @@ struct Submatrix {
 // Stores the KING coefficient for one pair of samples.
 struct KingResult {
   uint32_t sample_i, sample_j;
-  float coeff;
+  float kin, ibs0, ibs2;
 };
 
 // The maximum number of schedulable blocks in the y and z dimension.
@@ -189,7 +189,7 @@ constexpr uint32_t kMaxBlocksYZ = 65535u;
 
 __global__ void ComputeKingKernel(
     const Submatrix submatrix, const uint32_t words_per_sample,
-    const uint64_t *const bit_sets, const float coeff_threshold,
+    const uint64_t *const bit_sets, const float kin_threshold,
     const uint32_t max_results, KingResult *const results,
     uint32_t *const result_index, uint32_t *const result_overflow) {
   // Compute the sample indices from the block index.
@@ -212,7 +212,8 @@ __global__ void ComputeKingKernel(
 
   // Every thread compares a single entry for a contiguous memory block, to
   // maximize coalesced reads. Stride over the full region.
-  uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0;
+  uint32_t num_het_i = 0, num_het_j = 0, num_both_het = 0, num_opposing_hom = 0,
+           num_concordant_hom = 0, num_shared_sites = 0;
   for (uint32_t k = threadIdx.x; k < num_entries; k += blockDim.x) {
     const uint64_t het_i = het_i_entries[k];
     const uint64_t hom_alt_i = hom_alt_i_entries[k];
@@ -222,15 +223,19 @@ __global__ void ComputeKingKernel(
     const uint64_t hom_alt_j = hom_alt_j_entries[k];
     const uint64_t hom_ref_j = (~het_j) & (~hom_alt_j);
 
-    // Only count sites where both genotypes are defined.
-    const uint64_t missing_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
+    // Only count sites where both genotypes are defined. Missing entries have
+    // both the het and hom bits set simultaneously.
+    const uint64_t defined_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
 
     // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
-    num_het_i += __popcll(het_i & missing_mask);
-    num_het_j += __popcll(het_j & missing_mask);
-    num_both_het += __popcll(het_i & het_j & missing_mask);
+    num_het_i += __popcll(het_i & defined_mask);
+    num_het_j += __popcll(het_j & defined_mask);
+    num_both_het += __popcll(het_i & het_j & defined_mask);
     num_opposing_hom += __popcll(
-        ((hom_ref_i & hom_alt_j) | (hom_ref_j & hom_alt_i)) & missing_mask);
+        ((hom_ref_i & hom_alt_j) | (hom_alt_i & hom_ref_j)) & defined_mask);
+    num_concordant_hom += __popcll(
+        ((hom_ref_i & hom_ref_j) | (hom_alt_i & hom_alt_j)) & defined_mask);
+    num_shared_sites += __popcll(defined_mask);
   }
 
   // Perform a warp-wide partial reduction.
@@ -241,16 +246,22 @@ __global__ void ComputeKingKernel(
     num_het_j += __shfl_down_sync(shfl_mask, num_het_j, delta);
     num_both_het += __shfl_down_sync(shfl_mask, num_both_het, delta);
     num_opposing_hom += __shfl_down_sync(shfl_mask, num_opposing_hom, delta);
+    num_concordant_hom +=
+        __shfl_down_sync(shfl_mask, num_concordant_hom, delta);
+    num_shared_sites += __shfl_down_sync(shfl_mask, num_shared_sites, delta);
   }
 
   // The first thread initializes the shared memory.
   static __shared__ uint32_t shared_num_het_i, shared_num_het_j,
-      shared_num_both_het, shared_num_opposing_hom;
+      shared_num_both_het, shared_num_opposing_hom, shared_num_concordant_hom,
+      shared_num_shared_sites;
   if (threadIdx.x == 0) {
     shared_num_het_i = num_het_i;
     shared_num_het_j = num_het_j;
     shared_num_both_het = num_both_het;
     shared_num_opposing_hom = num_opposing_hom;
+    shared_num_concordant_hom = num_concordant_hom;
+    shared_num_shared_sites = num_shared_sites;
   }
   __syncthreads();
 
@@ -264,6 +275,8 @@ __global__ void ComputeKingKernel(
     atomicAdd(&shared_num_het_j, num_het_j);
     atomicAdd(&shared_num_both_het, num_both_het);
     atomicAdd(&shared_num_opposing_hom, num_opposing_hom);
+    atomicAdd(&shared_num_concordant_hom, num_concordant_hom);
+    atomicAdd(&shared_num_shared_sites, num_shared_sites);
   }
   __syncthreads();
 
@@ -274,20 +287,22 @@ __global__ void ComputeKingKernel(
   }
   const uint32_t min_hets =
       shared_num_het_i < shared_num_het_j ? shared_num_het_i : shared_num_het_j;
-  const float coeff =
+  const float kin =
       0.5f + (2.f * shared_num_both_het - 4.f * shared_num_opposing_hom -
               shared_num_het_i - shared_num_het_j) /
                  (4.f * min_hets);
 
   // Only emit results above the threshold.
-  if (coeff > coeff_threshold) {
+  if (kin > kin_threshold) {
     // Reserve a result slot atomically to avoid collisions.
     const uint32_t reserved = atomicAdd(result_index, 1u);
     if (reserved < max_results) {
       KingResult &result = results[reserved];
       result.sample_i = i;
       result.sample_j = j;
-      result.coeff = coeff;
+      result.kin = kin;
+      result.ibs0 = float(shared_num_opposing_hom) / shared_num_shared_sites;
+      result.ibs2 = float(shared_num_concordant_hom) / shared_num_shared_sites;
     } else {
       // result_index might overflow 32 bits, therefore keep a dedicated flag
       // that we ran out of space.
@@ -708,7 +723,7 @@ absl::Status Run() {
   constexpr uint32_t kNumBlockThreads = 4 * kWarpSize;
   ComputeKingKernel<<<num_blocks, kNumBlockThreads>>>(
       submatrix, words_per_sample, bit_set.get(),
-      absl::GetFlag(FLAGS_king_coeff_threshold), max_results, results.get(),
+      absl::GetFlag(FLAGS_kin_threshold), max_results, results.get(),
       &result_index_and_flag[0], &result_index_and_flag[1]);
 
   // Wait for GPU to finish before accessing on host.
@@ -731,12 +746,13 @@ absl::Status Run() {
   // Sort results to enable better columnar compression.
   std::sort(results.get(), results.get() + num_results,
             [](const KingResult &lhs, const KingResult &rhs) {
-              return std::tie(lhs.sample_i, lhs.sample_j, lhs.coeff) <
-                     std::tie(rhs.sample_i, rhs.sample_j, rhs.coeff);
+              return std::tie(lhs.sample_i, lhs.sample_j, lhs.kin) <
+                     std::tie(rhs.sample_i, rhs.sample_j, rhs.kin);
             });
 
   // Define the output table schema:
-  // i (sample1, string), j (sample2, string), phi (KING coefficient, float).
+  // i (sample1, string), j (sample2, string), kin (KING kinship, float),
+  // ibs0 (float), ibs2 (float).
   parquet::schema::NodeVector schema_fields;
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "i", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
@@ -745,7 +761,13 @@ absl::Status Run() {
       "j", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
       parquet::Type::BYTE_ARRAY));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
-      "phi", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
+      "kin", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
+      parquet::Type::FLOAT));
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "ibs0", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
+      parquet::Type::FLOAT));
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "ibs2", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
       parquet::Type::FLOAT));
   const auto schema = std::static_pointer_cast<parquet::schema::GroupNode>(
       parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED,
@@ -785,11 +807,25 @@ absl::Status Run() {
       col_writer->WriteBatch(1, nullptr, nullptr, &value);
     }
   }
-  {  // phi (float)
+  {  // kin (float)
     parquet::FloatWriter *const col_writer =
         static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
     for (uint32_t i = 0; i < num_results; i++) {
-      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].coeff);
+      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].kin);
+    }
+  }
+  {  // ibs0 (float)
+    parquet::FloatWriter *const col_writer =
+        static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].ibs0);
+    }
+  }
+  {  // ibs2 (float)
+    parquet::FloatWriter *const col_writer =
+        static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].ibs2);
     }
   }
 

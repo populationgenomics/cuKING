@@ -1,8 +1,10 @@
 # cuKING
 
-`cuKING` is a CUDA-based [KING relatedness](https://www.chen.kingrelatedness.com/publications/pdf/BI26_2867.pdf) estimator that scales to large sample numbers. The resulting coefficients are identical to [Hail's `hl.king` implementation](hail.is/docs/0.2/methods/relatedness.html#hail.methods.king).
+`cuKING` is a CUDA-based [KING relatedness](https://www.kingrelatedness.com) estimator that scales to large sample numbers. The resulting kinship coefficients are identical to [Hail's `hl.king` implementation](hail.is/docs/0.2/methods/relatedness.html#hail.methods.king).
 
-Hail's MatrixTable data layout is not well suited for the KING algorithm: KING compares genotypes pairwise, but a MatrixTable stores the genotypes of *all samples* at a locus in a block of memory. Effectively, `cuKING` therefore transposes the MatrixTable memory representation, allowing an efficient bit set based approach similar to the [C++ KING implementation](https://www.kingrelatedness.com/) or [`somalier`](https://github.com/brentp/somalier), but on the GPU.
+Hail's MatrixTable data layout is not well suited for the KING algorithm: KING compares genotypes pairwise, but a MatrixTable stores the genotypes of *all samples* at a locus in a block of memory. Effectively, `cuKING` therefore transposes the MatrixTable memory representation, enabling an efficient bit set based approach similar to [`somalier`](https://github.com/brentp/somalier), but on the GPU.
+
+Also inspired by `somalier`, IBS0 and IBS2 values are computed as well. This can be helpful to determine pedigree relationships. Note that `somalier` computes the "within-family" estimator, while `cuKING` matches Hail's "between-family" estimator.
 
 ## Usage
 
@@ -88,7 +90,7 @@ gcloud beta batch jobs submit cuking-gnomad-v4 \
     us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest cuking
     --input_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_packed.parquet
     --output_uri=gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.parquet
-    --king_coeff_threshold=0.05
+    --kin_threshold=0.05
     --requester_pays_project=cpg-gnomad-production-27bb"
 ```
 
@@ -124,6 +126,6 @@ spark = Env.spark_session()
 df = spark.read.parquet('gs://cpg-gnomad-production/relatedness/gnomad_v4.0_king_relatedness.parquet')
 ht = hl.Table.from_spark(df)
 
-pairs = ht.filter(ht.phi > 0.1)
+pairs = ht.filter(ht.kin > 0.1)
 related_samples_to_remove = hl.maximal_independent_set(pairs.i, pairs.j, False)
 ```
