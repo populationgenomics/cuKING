@@ -121,6 +121,7 @@ RUN mkdir -p /deps/arrow && cd /deps/arrow && \
         -DARROW_BUILD_STATIC=OFF \
         -DARROW_PARQUET=ON \
         -DARROW_WITH_ZSTD=ON \
+        -DARROW_WITH_SNAPPY=ON \
         -B cmake-out && \
     cmake --build cmake-out --target install && \
     ldconfig
