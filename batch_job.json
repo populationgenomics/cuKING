@@ -6,7 +6,6 @@
           "cpuMilli": 12000,
           "memoryMib": 87040
         },
-        "maxRetryCount": 2,
         "maxRunDuration": "36000s"
       }
     }
