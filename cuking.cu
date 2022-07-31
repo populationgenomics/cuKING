@@ -225,7 +225,6 @@ __global__ void ComputeKingKernel(
 
     // Only count sites where both genotypes are defined.
     const uint64_t missing_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
-    num_shared_sites += __popcll(missing_mask);
 
     // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
     num_het_i += __popcll(het_i & missing_mask);
@@ -235,6 +234,7 @@ __global__ void ComputeKingKernel(
         ((hom_ref_i & hom_alt_j) | (hom_alt_i & hom_ref_j)) & missing_mask);
     num_concordant_hom += __popcll(
         ((hom_ref_i & hom_ref_j) | (hom_alt_i & hom_alt_j)) & missing_mask);
+    num_shared_sites += __popcll(missing_mask);
   }
 
   // Perform a warp-wide partial reduction.
@@ -750,8 +750,8 @@ absl::Status Run() {
             });
 
   // Define the output table schema:
-  // i (sample1, string), j (sample2, string), kin (KING kinship coefficient,
-  // float), ibs0 (float), ibs2 (float).
+  // i (sample1, string), j (sample2, string), kin (KING kinship, float),
+  // ibs0 (float), ibs2 (float).
   parquet::schema::NodeVector schema_fields;
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "i", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
