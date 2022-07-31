@@ -223,18 +223,19 @@ __global__ void ComputeKingKernel(
     const uint64_t hom_alt_j = hom_alt_j_entries[k];
     const uint64_t hom_ref_j = (~het_j) & (~hom_alt_j);
 
-    // Only count sites where both genotypes are defined.
-    const uint64_t missing_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
+    // Only count sites where both genotypes are defined. Missing entries have
+    // both the het and hom bits set simultaneously.
+    const uint64_t defined_mask = ~(het_i & hom_alt_i) & ~(het_j & hom_alt_j);
 
     // See https://hail.is/docs/0.2/methods/relatedness.html#hail.methods.king.
-    num_het_i += __popcll(het_i & missing_mask);
-    num_het_j += __popcll(het_j & missing_mask);
-    num_both_het += __popcll(het_i & het_j & missing_mask);
+    num_het_i += __popcll(het_i & defined_mask);
+    num_het_j += __popcll(het_j & defined_mask);
+    num_both_het += __popcll(het_i & het_j & defined_mask);
     num_opposing_hom += __popcll(
-        ((hom_ref_i & hom_alt_j) | (hom_alt_i & hom_ref_j)) & missing_mask);
+        ((hom_ref_i & hom_alt_j) | (hom_alt_i & hom_ref_j)) & defined_mask);
     num_concordant_hom += __popcll(
-        ((hom_ref_i & hom_ref_j) | (hom_alt_i & hom_alt_j)) & missing_mask);
-    num_shared_sites += __popcll(missing_mask);
+        ((hom_ref_i & hom_ref_j) | (hom_alt_i & hom_alt_j)) & defined_mask);
+    num_shared_sites += __popcll(defined_mask);
   }
 
   // Perform a warp-wide partial reduction.
