@@ -4,7 +4,7 @@
 
 Hail's MatrixTable data layout is not well suited for the KING algorithm: KING compares genotypes pairwise, but a MatrixTable stores the genotypes of *all samples* at a locus in a block of memory. Effectively, `cuKING` therefore transposes the MatrixTable memory representation, enabling an efficient bit set based approach similar to [`somalier`](https://github.com/brentp/somalier), but on the GPU.
 
-Also inspired by `somalier`, IBS0 and IBS2 values are computed as well. This can be helpful to determine pedigree relationships. Note that `somalier` computes the "within-family" estimator, while `cuKING` matches Hail's "between-family" estimator.
+Also inspired by `somalier`, IBS0, IBS1, and IBS2 values are computed as well. This can be helpful for pedigree inference. Note that `somalier` computes the "within-family" estimator (scaled by a factor of two), while `cuKING` matches Hail's "between-family" estimator.
 
 ## Usage
 

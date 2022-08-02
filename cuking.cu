@@ -181,7 +181,8 @@ struct Submatrix {
 // Stores the KING coefficient for one pair of samples.
 struct KingResult {
   uint32_t sample_i, sample_j;
-  float kin, ibs0, ibs2;
+  float kin;
+  uint32_t ibs0, ibs1, ibs2;
 };
 
 // The maximum number of schedulable blocks in the y and z dimension.
@@ -301,8 +302,9 @@ __global__ void ComputeKingKernel(
       result.sample_i = i;
       result.sample_j = j;
       result.kin = kin;
-      result.ibs0 = float(shared_num_opposing_hom) / shared_num_shared_sites;
-      result.ibs2 = float(shared_num_concordant_hom) / shared_num_shared_sites;
+      result.ibs0 = shared_num_opposing_hom;
+      result.ibs2 = shared_num_concordant_hom + shared_num_both_het;
+      result.ibs1 = shared_num_shared_sites - result.ibs0 - result.ibs2;
     } else {
       // result_index might overflow 32 bits, therefore keep a dedicated flag
       // that we ran out of space.
@@ -752,7 +754,7 @@ absl::Status Run() {
 
   // Define the output table schema:
   // i (sample1, string), j (sample2, string), kin (KING kinship, float),
-  // ibs0 (float), ibs2 (float).
+  // ibs0 (int32), ibs1 (int32), ibs2 (int32).
   parquet::schema::NodeVector schema_fields;
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "i", parquet::Repetition::REQUIRED, parquet::LogicalType::String(),
@@ -765,10 +767,13 @@ absl::Status Run() {
       parquet::Type::FLOAT));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "ibs0", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
-      parquet::Type::FLOAT));
+      parquet::Type::INT32));
+  schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
+      "ibs1", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
+      parquet::Type::INT32));
   schema_fields.push_back(parquet::schema::PrimitiveNode::Make(
       "ibs2", parquet::Repetition::REQUIRED, parquet::LogicalType::None(),
-      parquet::Type::FLOAT));
+      parquet::Type::INT32));
   const auto schema = std::static_pointer_cast<parquet::schema::GroupNode>(
       parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED,
                                        schema_fields));
@@ -814,18 +819,31 @@ absl::Status Run() {
       col_writer->WriteBatch(1, nullptr, nullptr, &results[i].kin);
     }
   }
-  {  // ibs0 (float)
-    parquet::FloatWriter *const col_writer =
-        static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
+  {  // ibs0 (int32)
+    parquet::Int32Writer *const col_writer =
+        static_cast<parquet::Int32Writer *>(row_group_writer->NextColumn());
     for (uint32_t i = 0; i < num_results; i++) {
-      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].ibs0);
+      col_writer->WriteBatch(
+          1, nullptr, nullptr,
+          reinterpret_cast<const int32_t *>(&results[i].ibs0));
     }
   }
-  {  // ibs2 (float)
-    parquet::FloatWriter *const col_writer =
-        static_cast<parquet::FloatWriter *>(row_group_writer->NextColumn());
+  {  // ibs1 (int32)
+    parquet::Int32Writer *const col_writer =
+        static_cast<parquet::Int32Writer *>(row_group_writer->NextColumn());
     for (uint32_t i = 0; i < num_results; i++) {
-      col_writer->WriteBatch(1, nullptr, nullptr, &results[i].ibs2);
+      col_writer->WriteBatch(
+          1, nullptr, nullptr,
+          reinterpret_cast<const int32_t *>(&results[i].ibs1));
+    }
+  }
+  {  // ibs2 (int32)
+    parquet::Int32Writer *const col_writer =
+        static_cast<parquet::Int32Writer *>(row_group_writer->NextColumn());
+    for (uint32_t i = 0; i < num_results; i++) {
+      col_writer->WriteBatch(
+          1, nullptr, nullptr,
+          reinterpret_cast<const int32_t *>(&results[i].ibs2));
     }
   }
 
