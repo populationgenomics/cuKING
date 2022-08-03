@@ -15,7 +15,7 @@
         },
         "maxRunDuration": "36000s"
       },
-      "taskCount": 1
+      "taskCount": 10
     }
   ],
   "allocationPolicy": {
