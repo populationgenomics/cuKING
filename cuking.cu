@@ -33,7 +33,7 @@ ABSL_FLAG(std::string, output_uri, "",
 ABSL_FLAG(
     std::string, requester_pays_project, "",
     "The user project to use for accessing Requester Pays buckets on GCS.");
-ABSL_FLAG(size_t, num_reader_threads, 100,
+ABSL_FLAG(size_t, num_reader_threads, 36,
           "How many threads to use for processing of Parquet partitions. This "
           "influences the amount of memory required.");
 ABSL_FLAG(
