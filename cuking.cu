@@ -552,7 +552,7 @@ absl::Status Run() {
             input_bucket, input_file.first, requester_pays_project);
         if (input_stream.bad()) {
           return absl::FailedPreconditionError(
-              absl::StrCat("Failed to read ", input_files[i].first, ": ",
+              absl::StrCat("Failed to read ", input_file.first, ": ",
                            input_stream.status().message()));
         }
         // Read the entire file into memory, to save roundtrips to GCS.
@@ -565,10 +565,16 @@ absl::Status Run() {
         }
         input_stream.Close();
 
-        auto file_reader = parquet::ParquetFileReader::Open(
-            std::make_shared<arrow::io::BufferReader>(
-                reinterpret_cast<const uint8_t *>(file_buffer.data()),
-                file_buffer.size()));
+        std::unique_ptr<parquet::ParquetFileReader> file_reader;
+        try {
+          file_reader = parquet::ParquetFileReader::Open(
+              std::make_shared<arrow::io::BufferReader>(
+                  reinterpret_cast<const uint8_t *>(file_buffer.data()),
+                  file_buffer.size()));
+        } catch (const parquet::ParquetException &e) {
+          return absl::UnknownError(
+              absl::StrCat("Error reading ", input_file.first, ": ", e.what()));
+        }
         const auto file_metadata = file_reader->metadata();
         constexpr size_t kNumColumns = 3;
         if (file_metadata->num_columns() != kNumColumns) {
