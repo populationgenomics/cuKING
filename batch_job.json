@@ -2,12 +2,20 @@
   "taskGroups": [
     {
       "taskSpec": {
+        "runnables": [
+          {
+            "script": {
+              "text": "sudo docker run --name cuking --gpus all us-central1-docker.pkg.dev/cpg-gnomad-production-27bb/images/cuking:latest cuking --input_uri=gs://cpg-gnomad-production/relatedness/gnomad.exomes.v4.0.pre_ld_prune_qc_sites.parquet --output_uri=gs://cpg-gnomad-production/relatedness/gnomad.exomes.v4.0.pre_ld_prune_qc_sites_king.parquet --requester_pays_project=cpg-gnomad-production-27bb --kin_threshold=0.05 --split_factor=4 --shard_index=${BATCH_TASK_INDEX}"
+            }
+          }
+        ],
         "computeResource": {
           "cpuMilli": 12000,
           "memoryMib": 87040
         },
         "maxRunDuration": "36000s"
-      }
+      },
+      "taskCount": 1
     }
   ],
   "allocationPolicy": {
