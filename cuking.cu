@@ -527,8 +527,11 @@ absl::Status Run() {
   std::cout << "Listing input files...";
   std::cout.flush();
   std::vector<std::pair<std::string, size_t>> input_files;
-  for (const auto &blob_metadata_or_status : gcs_client.ListObjects(
-           input_bucket, gcs::Prefix(input_path), requester_pays_project)) {
+  // Using a "/" delimiter for ListObjects results in a non-recursive listing.
+  // That's useful to skip "_temporary" folders sometimes left behind by Spark.
+  for (const auto &blob_metadata_or_status :
+       gcs_client.ListObjects(input_bucket, gcs::Prefix(input_path),
+                              gcs::Delimiter("/"), requester_pays_project)) {
     ASSIGN_OR_RETURN(const auto &blob_metadata, blob_metadata_or_status);
     if (!absl::EndsWith(blob_metadata.name(), ".parquet")) {
       continue;  // Skip files that are not Parquet tables.
