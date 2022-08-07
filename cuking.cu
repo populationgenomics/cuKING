@@ -530,7 +530,7 @@ absl::Status Run() {
   // Using a "/" delimiter for ListObjects results in a non-recursive listing.
   // That's useful to skip "_temporary" folders sometimes left behind by Spark.
   for (const auto &blob_metadata_or_status :
-       gcs_client.ListObjects(input_bucket, gcs::Prefix(input_path),
+       gcs_client.ListObjects(input_bucket, gcs::Prefix(input_path + "/"),
                               gcs::Delimiter("/"), requester_pays_project)) {
     ASSIGN_OR_RETURN(const auto &blob_metadata, blob_metadata_or_status);
     if (!absl::EndsWith(blob_metadata.name(), ".parquet")) {
@@ -539,6 +539,9 @@ absl::Status Run() {
     input_files.emplace_back(blob_metadata.name(), blob_metadata.size());
   }
   std::cout << " (" << stop_watch.GetElapsedAndReset() << ")" << std::endl;
+  if (input_files.empty()) {
+    return absl::FailedPreconditionError("No input files found");
+  }
   std::cout << "Found " << input_files.size() << " input files." << std::endl;
 
   // Read Parquet tables in parallel, populating the bit set.
