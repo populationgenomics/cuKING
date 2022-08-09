@@ -3,7 +3,7 @@ steps:
     args: ['build', '-t', '$LOCATION-docker.pkg.dev/$PROJECT_ID/images/cuking:$TAG_NAME', '.']
     env:
       - 'DOCKER_BUILDKIT=1'
-images: ['$LOCATION-docker.pkg.dev/$PROJECT_ID/images/cuking:latest']
+images: ['$LOCATION-docker.pkg.dev/$PROJECT_ID/images/cuking:$TAG_NAME']
 timeout: 3600s
 options:
  machineType: 'E2_HIGHCPU_8'
