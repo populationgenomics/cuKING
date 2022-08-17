@@ -10,14 +10,14 @@ if __name__ == "__main__":
 
     # See Cloud Build variable substitutions.
     parser.add_argument("--location", required=True)
-    parser.add_argument("--project_id", required=True)
-    parser.add_argument("--tag_name", required=True)
+    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--tag-name", required=True)
     # See cuking.cu for argument help.
-    parser.add_argument("--input_uri", required=True)
-    parser.add_argument("--output_uri", required=True)
-    parser.add_argument("--requester_pays_project", required=True)
-    parser.add_argument("--kin_threshold", type=float, required=True)
-    parser.add_argument("--split_factor", type=int, required=True)
+    parser.add_argument("--input-uri", required=True)
+    parser.add_argument("--output-uri", required=True)
+    parser.add_argument("--requester-pays-project", required=True)
+    parser.add_argument("--kin-threshold", type=float, required=True)
+    parser.add_argument("--split-factor", type=int, required=True)
 
     args = parser.parse_args()
 
