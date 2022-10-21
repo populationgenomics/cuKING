@@ -81,6 +81,7 @@ You can use Cloud Batch to run multiple instances of `cuKING` currently. Run [`c
     --location=us-central1 \
     --project-id=$PROJECT_ID \
     --tag-name=$(git describe --tags) \
+    --service-account=cuking@PROJECT_ID.iam.gserviceaccount.com \
     --input-uri=gs://cpg-gnomad-production/relatedness/gnomad.exomes.v4.0.pre_ld_prune_qc_sites.parquet \
     --output-uri=gs://cpg-gnomad-production/relatedness/gnomad.exomes.v4.0.pre_ld_prune_qc_sites_king.parquet \
     --requester-pays-project=$PROJECT_ID \

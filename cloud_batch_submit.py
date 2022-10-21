@@ -12,6 +12,9 @@ if __name__ == "__main__":
     parser.add_argument("--location", required=True)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--tag-name", required=True)
+    # The service account to run the job should match the one used in the
+    # VM instance template.
+    parser.add_argument("--service-account", required=True)
     # See cuking.cu for argument help.
     parser.add_argument("--input-uri", required=True)
     parser.add_argument("--output-uri", required=True)
@@ -44,6 +47,9 @@ if __name__ == "__main__":
             }}
           ],
           "allocationPolicy": {{
+            "serviceAccount": {{
+              "email": "{service_account}"
+            }},
             "instances": [
               {{
                 "instanceTemplate": "cuking-instance-template"
