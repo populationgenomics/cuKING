@@ -19,7 +19,7 @@ if __name__ == '__main__':
     # VM instance template.
     parser.add_argument('--service-account', required=True)
     parser.add_argument(
-        '--write_success_file',
+        '--write-success-file',
         help='Waits for the Cloud Batch job to finish and writes a `_SUCCESS` file to the output directory if the job finished successfully.',
         action=argparse.BooleanOptionalAction,
         default=False,
