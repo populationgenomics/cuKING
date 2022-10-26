@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import subprocess
 import textwrap
+import os
+import time
 import uuid
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # See Cloud Build variable substitutions.
-    parser.add_argument("--location", required=True)
-    parser.add_argument("--project-id", required=True)
-    parser.add_argument("--tag-name", required=True)
+    parser.add_argument('--location', required=True)
+    parser.add_argument('--project-id', required=True)
+    parser.add_argument('--tag-name', required=True)
     # The service account to run the job should match the one used in the
     # VM instance template.
-    parser.add_argument("--service-account", required=True)
+    parser.add_argument('--service-account', required=True)
+    parser.add_argument(
+        '--write_success_file',
+        help='Waits for the Cloud Batch job to finish and writes a `_SUCCESS` file to the output directory if the job finished successfully.',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     # See cuking.cu for argument help.
-    parser.add_argument("--input-uri", required=True)
-    parser.add_argument("--output-uri", required=True)
-    parser.add_argument("--requester-pays-project", required=True)
-    parser.add_argument("--kin-threshold", type=float, required=True)
-    parser.add_argument("--split-factor", type=int, required=True)
+    parser.add_argument('--input-uri', required=True)
+    parser.add_argument('--output-uri', required=True)
+    parser.add_argument('--requester-pays-project', required=True)
+    parser.add_argument('--kin-threshold', type=float, required=True)
+    parser.add_argument('--split-factor', type=int, required=True)
 
     args = parser.parse_args()
 
@@ -71,7 +80,6 @@ if __name__ == "__main__":
     job_name = f'cuking-{uuid.uuid4()}'
     cmd = [
         'gcloud',
-        'beta',
         'batch',
         'jobs',
         'submit',
@@ -82,7 +90,41 @@ if __name__ == "__main__":
     print(f'Submitting job:\n    {" ".join(cmd)}')
     subprocess.run(cmd, check=True)
 
-    print(
-        f'\nTo check the status of the job, run:'
-        f'\n    gcloud beta batch jobs describe {job_name} --location={args.location}'
-    )
+    status_cmd = [
+        'gcloud',
+        'batch',
+        'jobs',
+        'describe',
+        job_name,
+        f'--location={args.location}',
+    ]
+    print(f'\nTo check the status of the job, run:\n    {" ".join(status_cmd)}')
+
+    if args.write_success_file:
+        while True:
+            proc = subprocess.run(
+                status_cmd + ['--format=json'], check=True, capture_output=True
+            )
+            output = proc.stdout.decode('utf-8').strip()
+            state = json.loads(output)['status']['state']
+            print(f'Current job state: {state}')
+            if state == 'SUCCEEDED':
+                print('Writing `_SUCCESS` file...')
+                cp_proc = subprocess.run(
+                    [
+                        'gcloud',
+                        'storage',
+                        'cp',
+                        '-',
+                        os.path.join(args.output_uri, '_SUCCESS'),
+                    ],
+                    input='',
+                    check=True,
+                )
+                break
+            elif state == 'FAILED':
+                print('Job failed, exiting...')
+                break
+
+            print('Waiting...')
+            time.sleep(5 * 60)  # 5 minutes
