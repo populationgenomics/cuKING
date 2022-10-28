@@ -21,7 +21,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--write-success-file',
         help='Waits for the Cloud Batch job to finish and writes a `_SUCCESS` file to the output directory if the job finished successfully.',
-        action=argparse.BooleanOptionalAction,
+        action='store_true',
         default=False,
     )
     # See cuking.cu for argument help.
